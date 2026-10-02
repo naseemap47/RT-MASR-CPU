@@ -384,18 +384,34 @@ class OnnxAsrPipeline:
         audio: Union[str, Path, np.ndarray],
         language: Optional[str] = None,
         max_new_tokens: int = 512,
-    ) -> Generator[str, None, None]:
+    ) -> Generator[tuple, None, None]:
         """
         Stream transcription text deltas in real-time as the model decodes tokens.
 
+        Yields ``(delta: str, timing: dict | None)`` tuples:
+          - During decoding every non-empty text chunk is yielded as ``(delta, None)``.
+          - After the decode loop completes, a final ``("", timing)`` sentinel is
+            yielded so callers can access full per-stage timing without a second pass.
+
+        The ``timing`` dict mirrors ``_transcribe_chunk`` and ``transcribe``:
+            mel_s            – mel-spectrogram computation time (s)
+            encoder_s        – encoder_conv + encoder_transformer time (s)
+            prepare_s        – prompt-build + embed-fuse time (s)
+            prefill_s        – decoder_init (KV-cache fill) time (s)
+            decode_s         – greedy token loop time (s)
+            tokens_generated – number of subword tokens decoded
+            total_s          – end-to-end time for this call (s)
+            audio_duration_s – length of the input waveform (s)
+            rtf              – total_s / audio_duration_s
+
         Args:
-            audio: Path to audio file or float32 audio waveform numpy array (16kHz).
+            audio: Path to audio file or float32 waveform numpy array (16 kHz).
             language: Optional target language tag.
             max_new_tokens: Maximum number of tokens to generate.
-
-        Yields:
-            str: Newly generated text delta chunks.
         """
+        t_total_start = time.time()
+
+        # ── Audio loading ──────────────────────────────────────────────────
         if isinstance(audio, (str, Path)):
             wav = load_audio(str(audio))
         elif isinstance(audio, np.ndarray):
@@ -403,22 +419,38 @@ class OnnxAsrPipeline:
         else:
             raise ValueError(f"Unsupported audio type: {type(audio)}. Expected file path or numpy array.")
 
+        audio_duration_s = len(wav) / SAMPLE_RATE
+
+        # ── Mel spectrogram ────────────────────────────────────────────────
+        t0 = time.time()
         mel = compute_mel_spectrogram(wav, self.mel_filters)
         mel_len = mel.shape[1]
+        t_mel = time.time() - t0
 
+        # ── Encoder ────────────────────────────────────────────────────────
+        t0 = time.time()
         audio_features = self._encode_audio(mel, mel_len)
         num_audio_tokens = audio_features.shape[0]
+        t_encoder = time.time() - t0
 
+        # ── Prompt prep + embedding fuse ───────────────────────────────────
+        t0 = time.time()
         token_ids = self._build_prompt_ids(num_audio_tokens, language)
         input_embeds = self._embed_and_fuse(token_ids, audio_features)
         seq_len = input_embeds.shape[1]
         position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+        t_prepare = time.time() - t0
 
+        # ── Decoder prefill (KV-cache init) ────────────────────────────────
+        t0 = time.time()
         logits, present_keys, present_values = self.decoder_init.run(None, {
             "input_embeds": input_embeds,
             "position_ids": position_ids,
         })
+        t_prefill = time.time() - t0
 
+        # ── Greedy decode loop ─────────────────────────────────────────────
+        t_decode_start = time.time()
         next_token = int(np.argmax(logits[0, -1, :]))
         cur_pos = seq_len
         generated = []
@@ -440,7 +472,7 @@ class OnnxAsrPipeline:
 
             if len(asr_text) > len(printed_text):
                 delta = asr_text[len(printed_text):]
-                yield delta
+                yield delta, None  # text delta; timing not yet available
                 printed_text = asr_text
 
             token_embed = self.embed_tokens[next_token][np.newaxis, np.newaxis, :]
@@ -455,6 +487,23 @@ class OnnxAsrPipeline:
 
             next_token = int(np.argmax(logits[0, -1, :]))
             cur_pos += 1
+
+        t_decode = time.time() - t_decode_start
+        t_total  = time.time() - t_total_start
+
+        # ── Final sentinel: empty delta + full timing dict ─────────────────
+        timing = {
+            "mel_s":            t_mel,
+            "encoder_s":        t_encoder,
+            "prepare_s":        t_prepare,
+            "prefill_s":        t_prefill,
+            "decode_s":         t_decode,
+            "tokens_generated": len(generated),
+            "total_s":          t_total,
+            "audio_duration_s": audio_duration_s,
+            "rtf":              t_total / audio_duration_s if audio_duration_s > 0 else 0.0,
+        }
+        yield "", timing
 
 
 class ONNXQwen3ASR:
@@ -482,8 +531,12 @@ class ONNXQwen3ASR:
         audio: Union[str, Path, np.ndarray],
         language: Optional[str] = None,
         max_new_tokens: int = 512,
-    ) -> Generator[str, None, None]:
-        """Stream real-time transcription text deltas for an audio file path or numpy array."""
+    ) -> Generator[tuple, None, None]:
+        """Stream real-time transcription for an audio file path or numpy array.
+
+        Yields ``(delta: str, timing: dict | None)`` — see
+        ``OnnxAsrPipeline.transcribe_stream`` for the full contract.
+        """
         lang = normalize_language(language) if language is not None else self.language
         yield from self.pipeline.transcribe_stream(audio, lang, max_new_tokens)
 
@@ -491,66 +544,87 @@ class ONNXQwen3ASR:
 # ── CLI ─────────────────────────────────────────────────────────────────
 
 # def main():
-    # parser = argparse.ArgumentParser(description="Qwen3-ASR Pure ONNX Inference")
-    # parser.add_argument("audio", nargs="+", help="Audio file(s)")
-    # parser.add_argument("--language", type=str, default=None)
-    # parser.add_argument("--onnx-dir", type=str, default="models/qwen3-asr-onnx")
-    # parser.add_argument("--max-new-tokens", type=int, default=512)
-    # parser.add_argument("--quantize", type=str, default="int8", choices=["none", "int8"],
-    #                     help="Decoder quantization: none (FP32) or int8 (default)")
-    # parser.add_argument("--chunk-sec", type=int, default=30,
-    #                     help="Target chunk length for long audio splitting (default: 30)")
-    # parser.add_argument("--threads", type=int, default=0, help="Number of threads (0=all)")
-    # args = parser.parse_args()
+#     import argparse
+#     parser = argparse.ArgumentParser(description="Qwen3-ASR Pure ONNX Inference")
+#     parser.add_argument("audio", nargs="+", help="Audio file(s)")
+#     parser.add_argument("--language", type=str, default=None)
+#     parser.add_argument("--onnx-dir", type=str, default="models/qwen3-asr-onnx")
+#     parser.add_argument("--max-new-tokens", type=int, default=512)
+#     parser.add_argument("--quantize", type=str, default="int8", choices=["none", "int8"],
+#                         help="Decoder quantization: none (FP32) or int8 (default)")
+#     parser.add_argument("--chunk-sec", type=int, default=30,
+#                         help="Target chunk length for long audio splitting (default: 30)")
+#     parser.add_argument("--threads", type=int, default=0, help="Number of threads (0=all)")
+#     args = parser.parse_args()
 
-    # pipeline = OnnxAsrPipeline(onnx_dir=args.onnx_dir, num_threads=args.threads,
-    #                            quantize=args.quantize)
+#     pipeline = OnnxAsrPipeline(onnx_dir=args.onnx_dir, num_threads=args.threads,
+#                                quantize=args.quantize)
 
-    # for audio_path in args.audio:
-    #     if not Path(audio_path).exists():
-    #         print(f"File not found: {audio_path}", file=sys.stderr)
-    #         continue
+#     results = []
+#     for audio_path in args.audio:
+#         if not Path(audio_path).exists():
+#             print(f"File not found: {audio_path}", file=sys.stderr)
+#             continue
 
-        # result = pipeline.transcribe(
-        #     audio_path, language=args.language,
-        #     max_new_tokens=args.max_new_tokens,
-        #     chunk_sec=args.chunk_sec,
-        # )
-            # results.append({
-            #     "file": audio_path, "language": result["language"],
-            #     "text": result["text"],
-            #     "audio_duration_s": result["timing"]["audio_duration_s"],
-            #     "processing_time_s": result["timing"]["total_s"],
-            #     "rtf": result["timing"]["rtf"],
-            # })
+#         result = pipeline.transcribe(
+#             audio_path, language=args.language,
+#             max_new_tokens=args.max_new_tokens,
+#             chunk_sec=args.chunk_sec,
+#         )
+#         results.append({
+#             "file": audio_path, "language": result["language"],
+#             "text": result["text"],
+#             "audio_duration_s": result["timing"]["audio_duration_s"],
+#             "processing_time_s": result["timing"]["total_s"],
+#             "rtf": result["timing"]["rtf"],
+#             })
         
-        # t = result["timing"]
-        # print(f"\n[{audio_path}] ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
-        # if result["language"]:
-        #     print(f"  Language: {result['language']}")
-        # print(f"  {result['text']}")
-        # print(f"  Encoder: {t['encoder_s']:.3f}s | Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | Tokens: {t['tokens_generated']}")
+#         t = result["timing"]
+#         print(f"\n[{audio_path}] ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
+#         if result["language"]:
+#             print(f"  Language: {result['language']}")
+#         print(f"  {result['text']}")
+#         print(f"  Encoder: {t['encoder_s']:.3f}s | Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | Tokens: {t['tokens_generated']}")
 
 
 if __name__ == "__main__":
-    # qwen3_asr_engine = ONNXQwen3ASR()
-    # result = qwen3_asr_engine.transcribe(
-    #     audio_path="test_audio/librispeech_0_1089_0.wav",
-    #     # language="English",
-    # )
-    # print(result)
-
-    # from src.engines.qwen3_engine import ONNXQwen3ASR
     import sys
 
-    engine = ONNXQwen3ASR(
+    # ── Example 1: transcribe() — returns full result dict ─────────────────
+    qwen3_asr_engine = ONNXQwen3ASR()
+    result = qwen3_asr_engine.transcribe(
+        audio_path="test_audio/en/librispeech_0_1089_0.wav",
         # language="English",
+    )
+    t = result["timing"]
+    print(f"\n[transcribe] ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
+    if result["language"]:
+        print(f"  Language: {result['language']}")
+    print(f"  {result['text']}")
+    print(f"  Mel: {t['mel_s']:.3f}s | Encoder: {t['encoder_s']:.3f}s | "
+          f"Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | "
+          f"Tokens: {t['tokens_generated']}")
+
+    # ── Example 2: transcribe_stream() — yields (delta, timing|None) tuples ─
+    engine = ONNXQwen3ASR(
+        language="English",
         # language="Mandarin",
         # language="Indonesian",
     )
 
-    # Stream text deltas real-time from an audio file or array
-    for delta in engine.transcribe_stream("test_audio/cn/OSR_cn_000_0073_8k.wav"):
-        sys.stdout.write(delta)
-        sys.stdout.flush()
+    print("\n[transcribe_stream] ", end="", flush=True)
+    stream_timing = None
+    for delta, timing in engine.transcribe_stream("test_audio/cn/OSR_cn_000_0073_8k.wav"):
+        if delta:
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+        if timing is not None:
+            stream_timing = timing
+
+    if stream_timing is not None:
+        t = stream_timing
+        print(f"\n  ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
+        print(f"  Mel: {t['mel_s']:.3f}s | Encoder: {t['encoder_s']:.3f}s | "
+              f"Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | "
+              f"Tokens: {t['tokens_generated']}")
 

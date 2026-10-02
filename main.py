@@ -151,14 +151,18 @@ async def websocket_call_stream(websocket: WebSocket):
                     # ── T2: mark inference start ───────────────────────
                     t_infer_start = session.mark_infer_start()
 
-                    # Collect all deltas; note first-token time while iterating
+                    # Collect deltas + capture stage timing from final sentinel
                     first_token_noted = session.first_token_time is not None
                     deltas = []
-                    for delta in engine.transcribe_stream(session.audio_buffer, language=call_language):
-                        deltas.append(delta)
-                        if not first_token_noted:
-                            session.mark_first_token()  # T3
-                            first_token_noted = True
+                    stage_timing = None
+                    for delta, timing in engine.transcribe_stream(session.audio_buffer, language=call_language):
+                        if delta:
+                            deltas.append(delta)
+                            if not first_token_noted:
+                                session.mark_first_token()  # T3
+                                first_token_noted = True
+                        if timing is not None:
+                            stage_timing = timing  # final sentinel
 
                     # ── Ty: inference end ──────────────────────────────
                     infer_duration_s = time.time() - t_infer_start
@@ -166,7 +170,7 @@ async def websocket_call_stream(websocket: WebSocket):
                     new_text = "".join(deltas)
                     if new_text != cumulative_text:
                         cumulative_text = new_text
-                        metrics = session.get_metrics(infer_duration_s)
+                        metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
                         await websocket.send_json({
                             "type": "transcript_delta",
                             "full_text": cumulative_text,
@@ -195,17 +199,22 @@ async def websocket_call_stream(websocket: WebSocket):
                         t_infer_start = session.mark_infer_start()
                         first_token_noted = session.first_token_time is not None
                         deltas = []
-                        for delta in engine.transcribe_stream(session.audio_buffer, language=call_language):
-                            deltas.append(delta)
-                            if not first_token_noted:
-                                session.mark_first_token()
-                                first_token_noted = True
+                        stage_timing = None
+                        for delta, timing in engine.transcribe_stream(session.audio_buffer, language=call_language):
+                            if delta:
+                                deltas.append(delta)
+                                if not first_token_noted:
+                                    session.mark_first_token()
+                                    first_token_noted = True
+                            if timing is not None:
+                                stage_timing = timing
                         infer_duration_s = time.time() - t_infer_start
                         cumulative_text = "".join(deltas)
                     else:
                         infer_duration_s = 0.0
+                        stage_timing = None
 
-                    metrics = session.get_metrics(infer_duration_s)
+                    metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
                     metrics["total_call_time_s"] = round(total_call_time, 2)
 
                     await websocket.send_json({

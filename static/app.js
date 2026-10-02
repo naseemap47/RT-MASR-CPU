@@ -13,12 +13,35 @@ document.addEventListener("DOMContentLoaded", () => {
   const metricChunks = document.getElementById("metric-chunks");
   const transcriptBox = document.getElementById("transcript-box");
 
+  const modelStatusText = document.getElementById("model-status-text");
+
   let selectedAudioArrayBuffer = null;
   let websocket = null;
   let audioContext = null;
+  let audioSourceNode = null;
   let timerInterval = null;
   let callStartTime = 0;
   let streamInterval = null;
+  let decodedAudioBuffer = null;
+
+  // Poll backend for model readiness status
+  function checkModelHealth() {
+    fetch("/api/health")
+      .then(res => res.json())
+      .then(data => {
+        if (data.model_ready && modelStatusText) {
+          modelStatusText.textContent = "MODEL: READY";
+          modelStatusText.style.background = "#059669"; // Emerald green
+        } else if (modelStatusText) {
+          modelStatusText.textContent = "MODEL: LOADING...";
+          setTimeout(checkModelHealth, 2000);
+        }
+      })
+      .catch(() => {
+        if (modelStatusText) setTimeout(checkModelHealth, 2000);
+      });
+  }
+  checkModelHealth();
 
   // Fetch available sample audio files from backend
   fetch("/api/samples")
@@ -71,27 +94,40 @@ document.addEventListener("DOMContentLoaded", () => {
     startBtn.disabled = true;
     hangupBtn.disabled = false;
     statusDot.classList.add("active");
-    statusText.textContent = "CALL IN PROGRESS";
-    transcriptBox.innerHTML = "<span class='placeholder'>Call connected. Streaming audio...</span>";
-    
-    callStartTime = Date.now();
-    timerInterval = setInterval(updateCallTimer, 1000);
+    statusText.textContent = "CONNECTING...";
+    transcriptBox.innerHTML = "<span class='placeholder'>Connecting call leg & warming pipeline...</span>";
 
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     
+    // Pre-decode audio buffer before starting streaming
+    audioContext.decodeAudioData(selectedAudioArrayBuffer.slice(0), (audioBuffer) => {
+      decodedAudioBuffer = audioBuffer;
+      connectWebSocketAndStart();
+    });
+  }
+
+  function connectWebSocketAndStart() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     websocket = new WebSocket(`${protocol}//${location.host}/ws/call-stream`);
     websocket.binaryType = "arraybuffer";
 
     websocket.onopen = () => {
-      audioContext.decodeAudioData(selectedAudioArrayBuffer.slice(0), (audioBuffer) => {
-        streamAudioBuffer(audioBuffer);
-      });
+      websocket.send(JSON.stringify({ type: "start_call" }));
     };
 
     websocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === "chunk_ack") {
+      
+      if (data.type === "call_ready") {
+        statusText.textContent = "CALL IN PROGRESS";
+        transcriptBox.innerHTML = "<span class='placeholder'>Call active. Streaming audio...</span>";
+        callStartTime = Date.now();
+        timerInterval = setInterval(updateCallTimer, 1000);
+        
+        if (decodedAudioBuffer) {
+          streamAudioBuffer(decodedAudioBuffer);
+        }
+      } else if (data.type === "chunk_ack") {
         metricChunks.textContent = data.chunks_received;
       } else if (data.type === "transcript_delta") {
         transcriptBox.textContent = data.full_text;
@@ -107,14 +143,34 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function streamAudioBuffer(audioBuffer) {
+    // Start real-time audio playback through speakers synchronously with chunk streaming
+    if (audioContext) {
+      if (audioContext.state === "suspended") {
+        audioContext.resume();
+      }
+      audioSourceNode = audioContext.createBufferSource();
+      audioSourceNode.buffer = audioBuffer;
+      audioSourceNode.connect(audioContext.destination);
+      audioSourceNode.start(0);
+    }
+
     const channelData = audioBuffer.getChannelData(0); // 16kHz float32
-    const chunkSize = 8000; // 0.5s chunk at 16kHz
+    const chunkSize = 8000; // 0.5s chunk at 16kHz (8000 samples)
     let offset = 0;
 
+    // Send first chunk immediately
+    sendNextChunk();
+
     streamInterval = setInterval(() => {
+      sendNextChunk();
+    }, 500); // 0.5s real-time pacing
+
+    function sendNextChunk() {
       if (offset >= channelData.length || !websocket || websocket.readyState !== WebSocket.OPEN) {
-        clearInterval(streamInterval);
-        streamInterval = null;
+        if (streamInterval) {
+          clearInterval(streamInterval);
+          streamInterval = null;
+        }
         if (websocket && websocket.readyState === WebSocket.OPEN) {
           websocket.send(JSON.stringify({ type: "end_call" }));
         }
@@ -129,7 +185,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       websocket.send(int16Buffer.buffer);
       offset += chunkSize;
-    }, 500); // 0.5s real-time pacing
+    }
   }
 
   function updateCallTimer() {
@@ -142,6 +198,11 @@ document.addEventListener("DOMContentLoaded", () => {
   function endCallLeg() {
     if (streamInterval) { clearInterval(streamInterval); streamInterval = null; }
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    if (audioSourceNode) {
+      try { audioSourceNode.stop(); } catch (e) {}
+      audioSourceNode.disconnect();
+      audioSourceNode = null;
+    }
     if (websocket) { websocket.close(); websocket = null; }
     if (audioContext) { audioContext.close(); audioContext = null; }
     startBtn.disabled = false;

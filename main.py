@@ -1,5 +1,6 @@
 import json
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -9,13 +10,23 @@ from fastapi.responses import FileResponse, JSONResponse
 from src.engines.qwen3_engine import ONNXQwen3ASR
 from src.engines.live_call_session import LiveCallSession
 
-app = FastAPI(title="RT-MASR Live Voice-Call Simulation")
+_engine: Optional[ONNXQwen3ASR] = None
+_model_ready: bool = False
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _engine, _model_ready
+    print("Preloading ONNX Qwen3 ASR Model Pipeline...")
+    _engine = ONNXQwen3ASR()
+    _model_ready = True
+    print("ONNX Qwen3 ASR Model Pipeline Preloaded and Ready.")
+    yield
+
+app = FastAPI(title="RT-MASR Live Voice-Call Simulation", lifespan=lifespan)
 
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-_engine: Optional[ONNXQwen3ASR] = None
 
 def get_engine() -> ONNXQwen3ASR:
     global _engine
@@ -29,6 +40,13 @@ def get_ui():
     if index_path.exists():
         return FileResponse(index_path)
     return JSONResponse({"message": "RT-MASR Web UI Server Ready"})
+
+@app.get("/api/health")
+def check_health():
+    return JSONResponse({
+        "status": "ok",
+        "model_ready": _model_ready
+    })
 
 @app.get("/api/samples")
 def list_samples():
@@ -54,6 +72,7 @@ async def websocket_call_stream(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_json({
         "type": "connected",
+        "model_ready": _model_ready,
         "message": "Connected to RT-MASR Live Call Stream"
     })
     
@@ -99,7 +118,15 @@ async def websocket_call_stream(websocket: WebSocket):
             
             elif "text" in message and message["text"]:
                 data = json.loads(message["text"])
-                if data.get("type") == "end_call":
+                msg_type = data.get("type")
+                
+                if msg_type == "start_call":
+                    start_call_time = time.time()
+                    await websocket.send_json({
+                        "type": "call_ready",
+                        "message": "Model ready. Call leg starting."
+                    })
+                elif msg_type == "end_call":
                     total_call_time = time.time() - start_call_time
                     if len(session.audio_buffer) > 0:
                         engine = get_engine()

@@ -13,12 +13,9 @@ Usage:
     python onnx_inference.py audio1.wav audio2.wav --language Korean
 """
 
-import argparse
-import json
-import sys
 import time
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, Generator, Union
 
 import numpy as np
 import onnxruntime as ort
@@ -359,6 +356,83 @@ class OnnxAsrPipeline:
             },
         }
 
+    def transcribe_stream(
+        self,
+        audio: Union[str, Path, np.ndarray],
+        language: Optional[str] = None,
+        max_new_tokens: int = 512,
+    ) -> Generator[str, None, None]:
+        """
+        Stream transcription text deltas in real-time as the model decodes tokens.
+
+        Args:
+            audio: Path to audio file or float32 audio waveform numpy array (16kHz).
+            language: Optional target language tag.
+            max_new_tokens: Maximum number of tokens to generate.
+
+        Yields:
+            str: Newly generated text delta chunks.
+        """
+        if isinstance(audio, (str, Path)):
+            wav = load_audio(str(audio))
+        elif isinstance(audio, np.ndarray):
+            wav = audio.astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported audio type: {type(audio)}. Expected file path or numpy array.")
+
+        mel = compute_mel_spectrogram(wav, self.mel_filters)
+        mel_len = mel.shape[1]
+
+        audio_features = self._encode_audio(mel, mel_len)
+        num_audio_tokens = audio_features.shape[0]
+
+        token_ids = self._build_prompt_ids(num_audio_tokens, language)
+        input_embeds = self._embed_and_fuse(token_ids, audio_features)
+        seq_len = input_embeds.shape[1]
+        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+
+        logits, present_keys, present_values = self.decoder_init.run(None, {
+            "input_embeds": input_embeds,
+            "position_ids": position_ids,
+        })
+
+        next_token = int(np.argmax(logits[0, -1, :]))
+        cur_pos = seq_len
+        generated = []
+        printed_text = ""
+
+        for _ in range(max_new_tokens):
+            if next_token in (IM_END_ID, ENDOFTEXT_ID):
+                break
+
+            generated.append(next_token)
+
+            raw_text = self.tokenizer.decode(generated)
+            if language is not None:
+                asr_text = raw_text
+            elif "<asr_text>" in raw_text:
+                asr_text = raw_text.split("<asr_text>", 1)[1]
+            else:
+                asr_text = ""
+
+            if len(asr_text) > len(printed_text):
+                delta = asr_text[len(printed_text):]
+                yield delta
+                printed_text = asr_text
+
+            token_embed = self.embed_tokens[next_token][np.newaxis, np.newaxis, :]
+            pos = np.array([[cur_pos]], dtype=np.int64)
+
+            logits, present_keys, present_values = self.decoder_step.run(None, {
+                "input_embeds": token_embed,
+                "position_ids": pos,
+                "past_keys": present_keys,
+                "past_values": present_values,
+            })
+
+            next_token = int(np.argmax(logits[0, -1, :]))
+            cur_pos += 1
+
 
 class ONNXQwen3ASR:
     def __init__(
@@ -372,6 +446,15 @@ class ONNXQwen3ASR:
     def transcribe(self, audio_path: str, language: Optional[str] = None,
                    max_new_tokens: int = 512, chunk_sec: int = 30) -> dict:
         return self.pipeline.transcribe(audio_path, language, max_new_tokens, chunk_sec)
+
+    def transcribe_stream(
+        self,
+        audio: Union[str, Path, np.ndarray],
+        language: Optional[str] = None,
+        max_new_tokens: int = 512,
+    ) -> Generator[str, None, None]:
+        """Stream real-time transcription text deltas for an audio file path or numpy array."""
+        yield from self.pipeline.transcribe_stream(audio, language, max_new_tokens)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
@@ -419,9 +502,20 @@ class ONNXQwen3ASR:
 
 
 if __name__ == "__main__":
-    qwen3_asr_engine = ONNXQwen3ASR()
-    result = qwen3_asr_engine.transcribe(
-        audio_path="test_audio/librispeech_0_1089_0.wav",
-        # language="English",
-    )
-    print(result)
+    # qwen3_asr_engine = ONNXQwen3ASR()
+    # result = qwen3_asr_engine.transcribe(
+    #     audio_path="test_audio/librispeech_0_1089_0.wav",
+    #     # language="English",
+    # )
+    # print(result)
+
+    # from src.engines.qwen3_engine import ONNXQwen3ASR
+    import sys
+
+    engine = ONNXQwen3ASR()
+
+    # Stream text deltas real-time from an audio file or array
+    for delta in engine.transcribe_stream("test_audio/librispeech_0_1089_0.wav"):
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+

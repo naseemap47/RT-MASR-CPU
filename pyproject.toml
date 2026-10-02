@@ -1,0 +1,24 @@
+[project]
+name = "rt-masr-cpu"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "librosa>=1.0.0",
+    "onnxruntime>=1.30.0",
+    "soundfile>=0.14.0",
+    "tokenizers>=0.23.2",
+    "transformers>=5.18.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+extraPaths = ["src"]
+

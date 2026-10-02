@@ -1,5 +1,24 @@
+"""
+main.py — FastAPI server for RT-MASR Live Voice-Call Simulation.
+
+Timestamp capture strategy (mirrors live_call_session.py docstring):
+  T0  session.mark_call_start()        when "start_call" WS message is received
+  T1  session.process_pcm_bytes()      first PCM binary frame arrives (set inside session)
+  T2  session.mark_infer_start()       just before engine.transcribe_stream() is called
+  Ty  time.time() after list(...)      just after the inference generator is exhausted
+  T3  session.mark_first_token()       called from main when first text delta is observed
+
+Stage timing (mel_s, encoder_s, prefill_s, decode_s, tokens_generated) is extracted
+by wrapping OnnxAsrPipeline._transcribe_chunk via a patched transcribe_stream that
+also returns timing info. Because transcribe_stream is a generator, we collect all
+deltas, then call _transcribe_chunk for timing (one extra pass is wasteful), so
+instead we time sub-phases directly via the session.
+"""
+
 import json
 import time
+import psutil
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -43,9 +62,15 @@ def get_ui():
 
 @app.get("/api/health")
 def check_health():
+    proc = psutil.Process(os.getpid())
+    mem_info = proc.memory_info()
     return JSONResponse({
         "status": "ok",
-        "model_ready": _model_ready
+        "model_ready": _model_ready,
+        "cpu_percent": proc.cpu_percent(interval=None),
+        "rss_mb": round(mem_info.rss / 1_048_576, 1),
+        "vms_mb": round(mem_info.vms / 1_048_576, 1),
+        "num_threads": proc.num_threads(),
     })
 
 @app.get("/api/samples")
@@ -93,75 +118,103 @@ async def websocket_call_stream(websocket: WebSocket):
         "model_ready": _model_ready,
         "message": "Connected to RT-MASR Live Call Stream"
     })
-    
+
     session = LiveCallSession()
     cumulative_text = ""
-    start_call_time = time.time()
     call_language: Optional[str] = None
-    
+
     try:
         while True:
             try:
                 message = await websocket.receive()
             except WebSocketDisconnect:
                 break
-            
+
             if message.get("type") == "websocket.disconnect":
                 break
-                
+
             if "bytes" in message and message["bytes"]:
                 pcm_data = message["bytes"]
                 stats = session.process_pcm_bytes(pcm_data)
-                
+
                 await websocket.send_json({
                     "type": "chunk_ack",
                     "buffered_seconds": stats["buffered_seconds"],
-                    "chunks_received": stats["chunks_received"]
+                    "chunks_received": stats["chunks_received"],
+                    "total_bytes": stats["total_bytes"],
                 })
-                
+
+                # Run inference every 2 chunks once we have >= 0.5 s of audio
                 if len(session.audio_buffer) >= 8000 and stats["chunks_received"] % 2 == 0:
                     engine = get_engine()
-                    t0 = time.time()
-                    deltas = list(engine.transcribe_stream(session.audio_buffer, language=call_language))
-                    proc_time = time.time() - t0
-                    
+
+                    # ── T2: mark inference start ───────────────────────
+                    t_infer_start = session.mark_infer_start()
+
+                    # Collect all deltas; note first-token time while iterating
+                    first_token_noted = session.first_token_time is not None
+                    deltas = []
+                    for delta in engine.transcribe_stream(session.audio_buffer, language=call_language):
+                        deltas.append(delta)
+                        if not first_token_noted:
+                            session.mark_first_token()  # T3
+                            first_token_noted = True
+
+                    # ── Ty: inference end ──────────────────────────────
+                    infer_duration_s = time.time() - t_infer_start
+
                     new_text = "".join(deltas)
                     if new_text != cumulative_text:
                         cumulative_text = new_text
-                        metrics = session.get_metrics(proc_time)
+                        metrics = session.get_metrics(infer_duration_s)
                         await websocket.send_json({
                             "type": "transcript_delta",
                             "full_text": cumulative_text,
-                            "metrics": metrics
+                            "metrics": metrics,
                         })
-            
+
             elif "text" in message and message["text"]:
                 data = json.loads(message["text"])
                 msg_type = data.get("type")
-                
+
                 if msg_type == "start_call":
                     call_language = data.get("language")
-                    start_call_time = time.time()
+                    # ── T0: call-start ─────────────────────────────────
+                    session.mark_call_start()
+                    cumulative_text = ""
                     await websocket.send_json({
                         "type": "call_ready",
-                        "message": f"Model ready (Language: {call_language or 'Auto-Detect'}). Call leg starting."
+                        "message": f"Model ready (Language: {call_language or 'Auto-Detect'}). Call leg starting.",
                     })
+
                 elif msg_type == "end_call":
-                    total_call_time = time.time() - start_call_time
+                    total_call_time = time.time() - session.start_time
+
                     if len(session.audio_buffer) > 0:
                         engine = get_engine()
-                        t0 = time.time()
-                        deltas = list(engine.transcribe_stream(session.audio_buffer, language=call_language))
-                        proc_time = time.time() - t0
+                        t_infer_start = session.mark_infer_start()
+                        first_token_noted = session.first_token_time is not None
+                        deltas = []
+                        for delta in engine.transcribe_stream(session.audio_buffer, language=call_language):
+                            deltas.append(delta)
+                            if not first_token_noted:
+                                session.mark_first_token()
+                                first_token_noted = True
+                        infer_duration_s = time.time() - t_infer_start
                         cumulative_text = "".join(deltas)
-                    metrics = session.get_metrics(total_call_time)
-                    
+                    else:
+                        infer_duration_s = 0.0
+
+                    metrics = session.get_metrics(infer_duration_s)
+                    metrics["total_call_time_s"] = round(total_call_time, 2)
+
                     await websocket.send_json({
                         "type": "call_ended",
                         "final_text": cumulative_text,
-                        "metrics": metrics
+                        "metrics": metrics,
                     })
                     break
+
     except WebSocketDisconnect:
         pass
 

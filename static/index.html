@@ -4,83 +4,249 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RT-MASR — Live Voice Call Leg Simulator</title>
+  <meta name="description" content="Real-time multilingual ASR streaming simulator powered by ONNX Qwen3-ASR-0.6B. Monitor live latency, RTF, throughput and memory telemetry.">
   <link rel="stylesheet" href="/static/style.css">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 </head>
 <body>
   <div class="app-container">
+
+    <!-- ════════ HEADER ════════ -->
     <header class="header">
       <div class="logo-group">
-        <span class="pulse-dot" id="status-dot"></span>
-        <h1>RT-MASR Live Call Simulator</h1>
+        <div class="logo-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="14" cy="14" r="13" stroke="url(#g1)" stroke-width="2"/>
+            <path d="M7 14 Q10 8 14 14 Q18 20 21 14" stroke="url(#g2)" stroke-width="2" stroke-linecap="round" fill="none"/>
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#6366f1"/><stop offset="1" stop-color="#10b981"/>
+              </linearGradient>
+              <linearGradient id="g2" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#6366f1"/><stop offset="1" stop-color="#10b981"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div>
+          <h1>RT-MASR <span class="title-sub">Live Call Simulator</span></h1>
+          <p class="title-desc">ONNX Qwen3-ASR-0.6B · CPU Inference</p>
+        </div>
       </div>
-      <div style="display:flex; gap:10px; align-items:center;">
-        <div class="status-badge" id="model-status-text" style="background:#374151;">MODEL: LOADING...</div>
-        <div class="status-badge" id="status-text">DISCONNECTED</div>
+      <div class="header-right">
+        <div class="stream-state-pill" id="stream-state-pill">
+          <span class="state-dot" id="state-dot"></span>
+          <span class="state-label" id="state-label">IDLE</span>
+        </div>
+        <div class="status-badge model-badge" id="model-status-text">MODEL: LOADING…</div>
       </div>
     </header>
 
+    <!-- ════════ MAIN GRID ════════ -->
     <main class="grid-layout">
-      <!-- Left Column: Controls & Audio Inputs -->
-      <section class="card input-card">
-        <h2>1. Target Language & Audio Call Leg</h2>
-        <div class="language-select-group">
-          <label for="language-select" class="field-label">Target Language:</label>
+
+      <!-- ── Left column: controls ── -->
+      <aside class="sidebar">
+        <section class="card control-card">
+          <h2 class="card-title">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11zm-.75-8.25v3l2.5 1.5.5-.87-2.25-1.35V5.25h-.75z"/></svg>
+            Language &amp; Audio Source
+          </h2>
+
+          <label class="field-label" for="language-select">Target Language</label>
           <select id="language-select" class="select-input">
             <option value="">Auto-Detect (Default)</option>
             <option value="en">English (en)</option>
             <option value="zh">Mandarin Chinese (zh)</option>
             <option value="id">Bahasa Indonesia (id)</option>
           </select>
-        </div>
 
-        <h3 class="subsection-title">Sample Test Audio Files</h3>
-        <div class="sample-buttons" id="sample-buttons">
-          <p class="loading-text">Loading audio samples...</p>
-        </div>
-        
-        <div class="divider">OR UPLOAD WAV</div>
-        <div class="file-dropzone" id="dropzone">
-          <input type="file" id="audio-file-input" accept=".wav" />
-          <p>Drag & drop Linear PCM .wav file or click to browse</p>
-          <span class="file-info" id="file-info">No file selected</span>
-        </div>
+          <h3 class="subsection-title">Sample Audio Files</h3>
+          <div class="sample-buttons" id="sample-buttons">
+            <p class="loading-text">Loading audio samples…</p>
+          </div>
 
-        <div class="controls-group">
-          <button id="start-btn" class="btn btn-primary" disabled>Start Call Leg</button>
-          <button id="hangup-btn" class="btn btn-danger" disabled>Hang Up</button>
-        </div>
-      </section>
+          <div class="divider">OR UPLOAD WAV</div>
+          <div class="file-dropzone" id="dropzone">
+            <input type="file" id="audio-file-input" accept=".wav">
+            <div class="dropzone-content">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              <p>Drag &amp; drop Linear PCM .wav or click to browse</p>
+            </div>
+            <span class="file-info" id="file-info">No file selected</span>
+          </div>
 
-      <!-- Right Column: Visualizer, Telemetry & Live Text -->
+          <!-- Controls -->
+          <div class="controls-group">
+            <button id="start-btn" class="btn btn-primary" disabled>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3 3l10 5-10 5V3z"/></svg>
+              Start Call
+            </button>
+            <button id="hangup-btn" class="btn btn-danger" disabled>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2l12 12M14 2L2 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              Hang Up
+            </button>
+            <button id="reset-btn" class="btn btn-ghost">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 2.5A7 7 0 1 0 14.9 8h-1.5A5.5 5.5 0 1 1 12 4.1L10 6h4V2l-1.5 1.5z"/></svg>
+              Reset
+            </button>
+          </div>
+
+          <!-- Process telemetry sidebar -->
+          <div class="proc-telemetry" id="proc-telemetry">
+            <div class="proc-row"><span class="proc-label">Process RSS</span><span class="proc-val" id="proc-rss">—</span></div>
+            <div class="proc-row"><span class="proc-label">Threads</span><span class="proc-val" id="proc-threads">—</span></div>
+            <div class="proc-row"><span class="proc-label">CPU%</span><span class="proc-val" id="proc-cpu">—</span></div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- ── Right column: telemetry + transcript ── -->
       <section class="main-display">
-        <!-- Telemetry Cards -->
-        <div class="telemetry-grid">
-          <div class="metric-card">
-            <span class="label">Call Duration</span>
-            <span class="value" id="metric-duration">00:00</span>
+
+        <!-- ── Primary latency grid (top row) ── -->
+        <div class="telemetry-section-label">
+          Latency &amp; Timing
+          <span class="ts-note">hover cards for definitions</span>
+        </div>
+        <div class="telemetry-grid primary-grid">
+
+          <div class="metric-card" data-tip="pipeline_latency_ms" id="card-pipeline-latency"
+               title="Pipeline Latency (T3−T0): wall-clock from start_call signal to first recognised text character. Includes WS negotiation, audio buffering, and full inference.">
+            <div class="metric-header">
+              <span class="metric-label">Pipeline Latency</span>
+              <span class="metric-tag">T3−T0</span>
+            </div>
+            <span class="metric-value" id="metric-pipeline-latency">— ms</span>
+            <span class="metric-sub">call-start → first text</span>
           </div>
-          <div class="metric-card">
-            <span class="label">Latency</span>
-            <span class="value" id="metric-latency">0 ms</span>
+
+          <div class="metric-card" data-tip="ttft_ms" id="card-ttft"
+               title="TTFT (T3−T2): Time-to-First-Token — from inference call start to first decoded text delta. Dominated by encoder + prefill.">
+            <div class="metric-header">
+              <span class="metric-label">TTFT</span>
+              <span class="metric-tag">T3−T2</span>
+            </div>
+            <span class="metric-value" id="metric-ttft">— ms</span>
+            <span class="metric-sub">infer start → first token</span>
           </div>
-          <div class="metric-card">
-            <span class="label">Real-Time Factor (RTF)</span>
-            <span class="value" id="metric-rtf">0.00x</span>
+
+          <div class="metric-card" data-tip="infer_latency_ms" id="card-infer-latency"
+               title="Inference Latency (Ty−Tx): wall-clock for one complete transcribe_stream pass over the current audio buffer.">
+            <div class="metric-header">
+              <span class="metric-label">Inference Latency</span>
+              <span class="metric-tag">Ty−Tx</span>
+            </div>
+            <span class="metric-value" id="metric-infer-latency">— ms</span>
+            <span class="metric-sub">full inference pass</span>
           </div>
-          <div class="metric-card">
-            <span class="label">Chunks Processed</span>
-            <span class="value" id="metric-chunks">0</span>
+
+          <div class="metric-card highlight-rtf" data-tip="rtf" id="card-rtf"
+               title="Real-Time Factor (RTF) = inference_time_s / audio_duration_s. Values &lt;1 = faster-than-real-time. Values &gt;1 = slower.">
+            <div class="metric-header">
+              <span class="metric-label">RTF</span>
+              <span class="metric-tag">infer/audio</span>
+            </div>
+            <span class="metric-value" id="metric-rtf">—x</span>
+            <span class="metric-sub">real-time factor</span>
+          </div>
+
+        </div>
+
+        <!-- ── Secondary grid: stage + throughput ── -->
+        <div class="telemetry-section-label">Stage Breakdown &amp; Throughput</div>
+        <div class="telemetry-grid secondary-grid">
+
+          <div class="metric-card" id="card-encoder"
+               title="Encoder Latency: time to run the ONNX encoder_conv + encoder_transformer on the mel spectrogram.">
+            <div class="metric-header"><span class="metric-label">Encoder</span><span class="metric-tag">stage</span></div>
+            <span class="metric-value small" id="metric-encoder">— ms</span>
+            <span class="metric-sub">conv + transformer</span>
+          </div>
+
+          <div class="metric-card" id="card-prefill"
+               title="Prefill Latency: time for decoder_init — processes full prompt + audio embeddings to generate KV cache.">
+            <div class="metric-header"><span class="metric-label">Prefill</span><span class="metric-tag">stage</span></div>
+            <span class="metric-value small" id="metric-prefill">— ms</span>
+            <span class="metric-sub">decoder init (KV fill)</span>
+          </div>
+
+          <div class="metric-card" id="card-decode"
+               title="Decode Latency: time for greedy token loop using decoder_step with KV-cache reuse.">
+            <div class="metric-header"><span class="metric-label">Decode</span><span class="metric-tag">stage</span></div>
+            <span class="metric-value small" id="metric-decode">— ms</span>
+            <span class="metric-sub">token generation loop</span>
+          </div>
+
+          <div class="metric-card" id="card-throughput"
+               title="Decoder Throughput: tokens generated per second = tokens_generated / decode_time_s.">
+            <div class="metric-header"><span class="metric-label">Throughput</span><span class="metric-tag">tok/s</span></div>
+            <span class="metric-value small" id="metric-throughput">—</span>
+            <span class="metric-sub">decoder tokens/sec</span>
+          </div>
+
+          <div class="metric-card" id="card-duration"
+               title="Call Wall-Clock Duration: time since start_call signal was received.">
+            <div class="metric-header"><span class="metric-label">Call Duration</span><span class="metric-tag">wall</span></div>
+            <span class="metric-value small mono" id="metric-duration">00:00</span>
+            <span class="metric-sub">wall-clock</span>
+          </div>
+
+          <div class="metric-card" id="card-chunks"
+               title="Chunks Received: number of PCM binary frames received over the WebSocket.">
+            <div class="metric-header"><span class="metric-label">Chunks</span><span class="metric-tag">PCM frames</span></div>
+            <span class="metric-value small" id="metric-chunks">0</span>
+            <span class="metric-sub">PCM frames rcvd</span>
+          </div>
+
+          <div class="metric-card" id="card-tokens"
+               title="Tokens Generated: total subword tokens decoded in the most recent inference pass.">
+            <div class="metric-header"><span class="metric-label">Tokens</span><span class="metric-tag">last pass</span></div>
+            <span class="metric-value small" id="metric-tokens">—</span>
+            <span class="metric-sub">decoded subwords</span>
+          </div>
+
+          <div class="metric-card" id="card-rss-delta"
+               title="RSS Delta: change in resident-set-size (process memory) since call start.">
+            <div class="metric-header"><span class="metric-label">Memory Δ</span><span class="metric-tag">RSS</span></div>
+            <span class="metric-value small" id="metric-rss-delta">— MB</span>
+            <span class="metric-sub">since call start</span>
+          </div>
+
+        </div>
+
+        <!-- ── Pipeline waterfall bar ── -->
+        <div class="waterfall-container" id="waterfall-container">
+          <div class="waterfall-label">Pipeline Stage Waterfall (last pass)</div>
+          <div class="waterfall-bar-wrap">
+            <div class="wf-segment wf-mel"      id="wf-mel"      title="Mel spectrogram"><span class="wf-seg-label">Mel</span></div>
+            <div class="wf-segment wf-encoder"  id="wf-encoder"  title="Encoder"><span class="wf-seg-label">Enc</span></div>
+            <div class="wf-segment wf-prefill"  id="wf-prefill"  title="Prefill"><span class="wf-seg-label">Pre</span></div>
+            <div class="wf-segment wf-decode"   id="wf-decode"   title="Decode"><span class="wf-seg-label">Dec</span></div>
+          </div>
+          <div class="waterfall-legend">
+            <span class="wf-leg wf-mel">Mel</span>
+            <span class="wf-leg wf-encoder">Encoder</span>
+            <span class="wf-leg wf-prefill">Prefill</span>
+            <span class="wf-leg wf-decode">Decode</span>
           </div>
         </div>
 
-        <!-- Streaming Transcript Terminal -->
+        <!-- ── Live transcript ── -->
         <div class="card transcript-card">
-          <h2>Live ASR Recognition Stream</h2>
+          <div class="transcript-header">
+            <h2>Live ASR Recognition Stream</h2>
+            <div class="transcript-meta" id="transcript-meta"></div>
+          </div>
           <div class="transcript-box" id="transcript-box">
-            <span class="placeholder">Recognition output will stream live here during the call leg...</span>
+            <span class="placeholder">Recognition output will stream live here during the call leg…</span>
           </div>
         </div>
+
       </section>
     </main>
   </div>

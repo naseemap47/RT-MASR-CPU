@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RT-MASR — Live Voice Call Leg Simulator</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <div class="logo-group">
+        <span class="pulse-dot" id="status-dot"></span>
+        <h1>RT-MASR Live Call Simulator</h1>
+      </div>
+      <div class="status-badge" id="status-text">DISCONNECTED</div>
+    </header>
+
+    <main class="grid-layout">
+      <!-- Left Column: Controls & Audio Inputs -->
+      <section class="card input-card">
+        <h2>1. Select Audio Call Leg</h2>
+        <div class="sample-buttons" id="sample-buttons">
+          <p class="loading-text">Loading audio samples...</p>
+        </div>
+        
+        <div class="divider">OR UPLOAD WAV</div>
+        <div class="file-dropzone" id="dropzone">
+          <input type="file" id="audio-file-input" accept=".wav" />
+          <p>Drag & drop Linear PCM .wav file or click to browse</p>
+          <span class="file-info" id="file-info">No file selected</span>
+        </div>
+
+        <div class="controls-group">
+          <button id="start-btn" class="btn btn-primary" disabled>Start Call Leg</button>
+          <button id="hangup-btn" class="btn btn-danger" disabled>Hang Up</button>
+        </div>
+      </section>
+
+      <!-- Right Column: Visualizer, Telemetry & Live Text -->
+      <section class="main-display">
+        <!-- Telemetry Cards -->
+        <div class="telemetry-grid">
+          <div class="metric-card">
+            <span class="label">Call Duration</span>
+            <span class="value" id="metric-duration">00:00</span>
+          </div>
+          <div class="metric-card">
+            <span class="label">Latency</span>
+            <span class="value" id="metric-latency">0 ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="label">Real-Time Factor (RTF)</span>
+            <span class="value" id="metric-rtf">0.00x</span>
+          </div>
+          <div class="metric-card">
+            <span class="label">Chunks Processed</span>
+            <span class="value" id="metric-chunks">0</span>
+          </div>
+        </div>
+
+        <!-- Audio Oscilloscope Canvas -->
+        <div class="card visualizer-card">
+          <h2>Live Audio Stream Waveform</h2>
+          <canvas id="waveform-canvas" height="100"></canvas>
+        </div>
+
+        <!-- Streaming Transcript Terminal -->
+        <div class="card transcript-card">
+          <h2>Live ASR Recognition Stream</h2>
+          <div class="transcript-box" id="transcript-box">
+            <span class="placeholder">Recognition output will stream live here during the call leg...</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

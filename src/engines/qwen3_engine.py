@@ -47,6 +47,28 @@ NEWLINE_ID = 198        # '\n'
 VOCAB_SIZE = 151936
 HIDDEN_SIZE = 1024
 
+# Language mapping dictionary for supported target languages
+LANGUAGE_MAP = {
+    "en": "English",
+    "english": "English",
+    "zh": "Mandarin",
+    "cn": "Mandarin",
+    "mandarin": "Mandarin",
+    "mandarin chinese": "Mandarin",
+    "chinese": "Mandarin",
+    "id": "Indonesian",
+    "indonesian": "Indonesian",
+    "bahasa indonesia": "Indonesian",
+    "bahasa": "Indonesian",
+}
+
+
+def normalize_language(language: Optional[str]) -> Optional[str]:
+    if not language:
+        return None
+    lang_clean = language.strip().lower()
+    return LANGUAGE_MAP.get(lang_clean, language.strip())
+
 
 # ── Tokenizer (minimal, no HuggingFace dependency) ─────────────────────
 
@@ -183,8 +205,9 @@ class OnnxAsrPipeline:
         ids += [IM_END_ID, NEWLINE_ID]
         # <|im_start|>assistant\n
         ids += [IM_START_ID] + self.tokenizer.encode("assistant") + [NEWLINE_ID]
-        if language:
-            lang_tokens = self.tokenizer.encode(f"language {language}<asr_text>")
+        lang = normalize_language(language)
+        if lang:
+            lang_tokens = self.tokenizer.encode(f"language {lang}<asr_text>")
             ids += lang_tokens
         return ids
 
@@ -437,15 +460,22 @@ class OnnxAsrPipeline:
 class ONNXQwen3ASR:
     def __init__(
         self, onnx_dir: str = "models/qwen3-asr-onnx", num_threads: int = 0,
-        quantize: Literal["int8", "fp32"] = "int8"
+        quantize: Literal["int8", "fp32"] = "int8", language: Optional[str] = None,
     ):
         self.pipeline = OnnxAsrPipeline(
             onnx_dir, num_threads, quantize
         )
+        self.language = normalize_language(language)
 
-    def transcribe(self, audio_path: str, language: Optional[str] = None,
-                   max_new_tokens: int = 512, chunk_sec: int = 30) -> dict:
-        return self.pipeline.transcribe(audio_path, language, max_new_tokens, chunk_sec)
+    def transcribe(
+        self,
+        audio_path: str,
+        max_new_tokens: int = 512,
+        chunk_sec: int = 30,
+        language: Optional[str] = None,
+    ) -> dict:
+        lang = normalize_language(language) if language is not None else self.language
+        return self.pipeline.transcribe(audio_path, lang, max_new_tokens, chunk_sec)
 
     def transcribe_stream(
         self,
@@ -454,7 +484,8 @@ class ONNXQwen3ASR:
         max_new_tokens: int = 512,
     ) -> Generator[str, None, None]:
         """Stream real-time transcription text deltas for an audio file path or numpy array."""
-        yield from self.pipeline.transcribe_stream(audio, language, max_new_tokens)
+        lang = normalize_language(language) if language is not None else self.language
+        yield from self.pipeline.transcribe_stream(audio, lang, max_new_tokens)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
@@ -512,10 +543,14 @@ if __name__ == "__main__":
     # from src.engines.qwen3_engine import ONNXQwen3ASR
     import sys
 
-    engine = ONNXQwen3ASR()
+    engine = ONNXQwen3ASR(
+        # language="English",
+        # language="Mandarin",
+        # language="Indonesian",
+    )
 
     # Stream text deltas real-time from an audio file or array
-    for delta in engine.transcribe_stream("test_audio/librispeech_0_1089_0.wav"):
+    for delta in engine.transcribe_stream("test_audio/cn/OSR_cn_000_0073_8k.wav"):
         sys.stdout.write(delta)
         sys.stdout.flush()
 

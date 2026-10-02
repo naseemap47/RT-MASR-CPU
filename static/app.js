@@ -43,27 +43,51 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   checkModelHealth();
 
+  const languageSelect = document.getElementById("language-select");
+
   // Fetch available sample audio files from backend
   fetch("/api/samples")
     .then(res => res.json())
     .then(data => {
       sampleButtonsContainer.innerHTML = "";
       if (data.samples && data.samples.length > 0) {
+        // Group samples by language_name
+        const groups = {};
         data.samples.forEach(sample => {
-          const btn = document.createElement("button");
-          btn.className = "sample-btn";
-          btn.textContent = `🎵 ${sample.name} (${(sample.size_bytes / 1024).toFixed(0)} KB)`;
-          btn.onclick = () => loadSampleAudio(sample.name);
-          sampleButtonsContainer.appendChild(btn);
+          const groupName = sample.language_name || "Other";
+          if (!groups[groupName]) groups[groupName] = [];
+          groups[groupName].push(sample);
+        });
+
+        Object.keys(groups).forEach(groupName => {
+          const groupHeader = document.createElement("div");
+          groupHeader.className = "lang-group-header";
+          groupHeader.textContent = `🌐 ${groupName}`;
+          sampleButtonsContainer.appendChild(groupHeader);
+
+          groups[groupName].forEach(sample => {
+            const btn = document.createElement("button");
+            btn.className = "sample-btn";
+            btn.innerHTML = `<span class="lang-badge">${sample.language_code.toUpperCase()}</span> 🎵 ${sample.name} (${(sample.size_bytes / 1024).toFixed(0)} KB)`;
+            btn.onclick = (e) => {
+              document.querySelectorAll(".sample-btn").forEach(b => b.classList.remove("selected"));
+              btn.classList.add("selected");
+              if (sample.language_code && sample.language_code !== "auto") {
+                languageSelect.value = sample.language_code;
+              }
+              loadSampleAudio(sample.path, sample.name);
+            };
+            sampleButtonsContainer.appendChild(btn);
+          });
         });
       } else {
         sampleButtonsContainer.innerHTML = "<p class='loading-text'>No sample files found.</p>";
       }
     });
 
-  function loadSampleAudio(filename) {
+  function loadSampleAudio(samplePath, filename) {
     fileInfo.textContent = `Loading ${filename}...`;
-    fetch(`/api/samples/${filename}`)
+    fetch(`/api/samples/${samplePath}`)
       .then(res => res.arrayBuffer())
       .then(buffer => {
         selectedAudioArrayBuffer = buffer;
@@ -75,6 +99,7 @@ document.addEventListener("DOMContentLoaded", () => {
   audioFileInput.addEventListener("change", (e) => {
     const file = e.target.files[0];
     if (file) {
+      document.querySelectorAll(".sample-btn").forEach(b => b.classList.remove("selected"));
       fileInfo.textContent = `Selected: ${file.name}`;
       const reader = new FileReader();
       reader.onload = (evt) => {
@@ -111,8 +136,10 @@ document.addEventListener("DOMContentLoaded", () => {
     websocket = new WebSocket(`${protocol}//${location.host}/ws/call-stream`);
     websocket.binaryType = "arraybuffer";
 
+    const targetLang = languageSelect ? languageSelect.value : "";
+
     websocket.onopen = () => {
-      websocket.send(JSON.stringify({ type: "start_call" }));
+      websocket.send(JSON.stringify({ type: "start_call", language: targetLang }));
     };
 
     websocket.onmessage = (event) => {

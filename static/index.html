@@ -23,7 +23,18 @@
     <main class="grid-layout">
       <!-- Left Column: Controls & Audio Inputs -->
       <section class="card input-card">
-        <h2>1. Select Audio Call Leg</h2>
+        <h2>1. Target Language & Audio Call Leg</h2>
+        <div class="language-select-group">
+          <label for="language-select" class="field-label">Target Language:</label>
+          <select id="language-select" class="select-input">
+            <option value="">Auto-Detect (Default)</option>
+            <option value="en">English (en)</option>
+            <option value="zh">Mandarin Chinese (zh)</option>
+            <option value="id">Bahasa Indonesia (id)</option>
+          </select>
+        </div>
+
+        <h3 class="subsection-title">Sample Test Audio Files</h3>
         <div class="sample-buttons" id="sample-buttons">
           <p class="loading-text">Loading audio samples...</p>
         </div>

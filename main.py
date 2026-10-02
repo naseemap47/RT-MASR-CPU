@@ -53,16 +53,34 @@ def list_samples():
     test_audio_dir = Path("test_audio")
     samples = []
     if test_audio_dir.exists():
-        for wav_file in test_audio_dir.glob("*.wav"):
+        for wav_file in test_audio_dir.glob("**/*.wav"):
+            rel_path = wav_file.relative_to(test_audio_dir)
+            parent_name = rel_path.parent.name.lower()
+            if parent_name == "en":
+                lang_code = "en"
+                lang_name = "English"
+            elif parent_name in ("cn", "zh"):
+                lang_code = "zh"
+                lang_name = "Mandarin Chinese"
+            elif parent_name == "id":
+                lang_code = "id"
+                lang_name = "Bahasa Indonesia"
+            else:
+                lang_code = "auto"
+                lang_name = "Auto-Detect"
+
             samples.append({
+                "path": str(rel_path),
                 "name": wav_file.name,
+                "language_code": lang_code,
+                "language_name": lang_name,
                 "size_bytes": wav_file.stat().st_size
             })
     return {"samples": samples}
 
-@app.get("/api/samples/{filename}")
-def get_sample_file(filename: str):
-    file_path = Path("test_audio") / filename
+@app.get("/api/samples/{filepath:path}")
+def get_sample_file(filepath: str):
+    file_path = Path("test_audio") / filepath
     if file_path.exists() and file_path.suffix == ".wav":
         return FileResponse(file_path, media_type="audio/wav")
     return JSONResponse({"error": "File not found"}, status_code=404)
@@ -79,6 +97,7 @@ async def websocket_call_stream(websocket: WebSocket):
     session = LiveCallSession()
     cumulative_text = ""
     start_call_time = time.time()
+    call_language: Optional[str] = None
     
     try:
         while True:
@@ -103,7 +122,7 @@ async def websocket_call_stream(websocket: WebSocket):
                 if len(session.audio_buffer) >= 8000 and stats["chunks_received"] % 2 == 0:
                     engine = get_engine()
                     t0 = time.time()
-                    deltas = list(engine.transcribe_stream(session.audio_buffer))
+                    deltas = list(engine.transcribe_stream(session.audio_buffer, language=call_language))
                     proc_time = time.time() - t0
                     
                     new_text = "".join(deltas)
@@ -121,17 +140,18 @@ async def websocket_call_stream(websocket: WebSocket):
                 msg_type = data.get("type")
                 
                 if msg_type == "start_call":
+                    call_language = data.get("language")
                     start_call_time = time.time()
                     await websocket.send_json({
                         "type": "call_ready",
-                        "message": "Model ready. Call leg starting."
+                        "message": f"Model ready (Language: {call_language or 'Auto-Detect'}). Call leg starting."
                     })
                 elif msg_type == "end_call":
                     total_call_time = time.time() - start_call_time
                     if len(session.audio_buffer) > 0:
                         engine = get_engine()
                         t0 = time.time()
-                        deltas = list(engine.transcribe_stream(session.audio_buffer))
+                        deltas = list(engine.transcribe_stream(session.audio_buffer, language=call_language))
                         proc_time = time.time() - t0
                         cumulative_text = "".join(deltas)
                     metrics = session.get_metrics(total_call_time)

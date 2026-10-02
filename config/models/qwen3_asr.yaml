@@ -1,0 +1,12 @@
+name: "qwen3_asr"
+display_name: "Qwen3-ASR Multilingual"
+languages: ["en", "zh", "id"]
+streaming_supported: true
+cpu_threads: 4
+quantization: "int8"
+device: "cpu"
+context_window_ms: 3000
+
+model_params:
+  variant: "0.6b"
+  runtime: "onnx"

@@ -67,6 +67,10 @@ async def websocket_call_stream(websocket: WebSocket):
                 message = await websocket.receive()
             except WebSocketDisconnect:
                 break
+            
+            if message.get("type") == "websocket.disconnect":
+                break
+                
             if "bytes" in message and message["bytes"]:
                 pcm_data = message["bytes"]
                 stats = session.process_pcm_bytes(pcm_data)
@@ -113,3 +117,7 @@ async def websocket_call_stream(websocket: WebSocket):
                     break
     except WebSocketDisconnect:
         pass
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -12,8 +12,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const metricRtf = document.getElementById("metric-rtf");
   const metricChunks = document.getElementById("metric-chunks");
   const transcriptBox = document.getElementById("transcript-box");
-  const canvas = document.getElementById("waveform-canvas");
-  const canvasCtx = canvas.getContext("2d");
 
   let selectedAudioArrayBuffer = null;
   let websocket = null;
@@ -129,29 +127,9 @@ document.addEventListener("DOMContentLoaded", () => {
         int16Buffer[i] = Math.max(-1, Math.min(1, chunkFloat32[i])) * 0x7FFF;
       }
 
-      drawWaveform(chunkFloat32);
       websocket.send(int16Buffer.buffer);
       offset += chunkSize;
     }, 500); // 0.5s real-time pacing
-  }
-
-  function drawWaveform(samples) {
-    canvasCtx.fillStyle = "rgba(0, 0, 0, 0.3)";
-    canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-    canvasCtx.lineWidth = 2;
-    canvasCtx.strokeStyle = "#10b981";
-    canvasCtx.beginPath();
-
-    const sliceWidth = canvas.width / samples.length;
-    let x = 0;
-    for (let i = 0; i < samples.length; i += 10) {
-      const v = (samples[i] + 1) / 2;
-      const y = v * canvas.height;
-      if (i === 0) canvasCtx.moveTo(x, y);
-      else canvasCtx.lineTo(x, y);
-      x += sliceWidth * 10;
-    }
-    canvasCtx.stroke();
   }
 
   function updateCallTimer() {

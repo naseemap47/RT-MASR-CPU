@@ -54,7 +54,7 @@ body {
   margin-bottom: 20px;
 }
 
-.input-card h2, .visualizer-card h2, .transcript-card h2 {
+.input-card h2, .transcript-card h2 {
   font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--text-muted);
 }
 
@@ -95,8 +95,6 @@ body {
 }
 .metric-card .label { font-size: 0.75rem; color: var(--text-muted); }
 .metric-card .value { font-size: 1.25rem; font-weight: 700; color: var(--text-main); }
-
-canvas { width: 100%; border-radius: 6px; background: rgba(0, 0, 0, 0.3); }
 
 .transcript-box {
   background: rgba(0, 0, 0, 0.4); border-radius: 8px; padding: 16px;

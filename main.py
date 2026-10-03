@@ -15,6 +15,7 @@ deltas, then call _transcribe_chunk for timing (one extra pass is wasteful), so
 instead we time sub-phases directly via the session.
 """
 
+import asyncio
 import json
 import time
 import psutil
@@ -110,6 +111,40 @@ def get_sample_file(filepath: str):
         return FileResponse(file_path, media_type="audio/wav")
     return JSONResponse({"error": "File not found"}, status_code=404)
 
+async def _run_inference(
+    engine: ONNXQwen3ASR,
+    audio_buffer: "np.ndarray",
+    language: Optional[str],
+) -> tuple[list[str], dict | None]:
+    """Run transcribe_stream in a thread-pool executor.
+
+    The sync CPU generator is collected inside a plain function (_collect)
+    and dispatched with run_in_executor so the asyncio event loop is never
+    blocked — new PCM chunks keep arriving while inference runs.
+
+    Returns
+    -------
+    (deltas, stage_timing)
+        deltas      : list of text delta strings yielded during decode
+        stage_timing: timing dict from the final ("", timing) sentinel,
+                      or None if the generator produced no output
+    """
+    import numpy as np  # local import — already loaded, no cost
+    loop = asyncio.get_event_loop()
+
+    def _collect() -> tuple[list[str], dict | None]:
+        deltas: list[str] = []
+        stage_timing = None
+        for delta, timing in engine.transcribe_stream(audio_buffer, language=language):
+            if delta:
+                deltas.append(delta)
+            if timing is not None:
+                stage_timing = timing
+        return deltas, stage_timing
+
+    return await loop.run_in_executor(None, _collect)
+
+
 @app.websocket("/ws/call-stream")
 async def websocket_call_stream(websocket: WebSocket):
     await websocket.accept()
@@ -150,19 +185,15 @@ async def websocket_call_stream(websocket: WebSocket):
 
                     # ── T2: mark inference start ───────────────────────
                     t_infer_start = session.mark_infer_start()
-
-                    # Collect deltas + capture stage timing from final sentinel
                     first_token_noted = session.first_token_time is not None
-                    deltas = []
-                    stage_timing = None
-                    for delta, timing in engine.transcribe_stream(session.audio_buffer, language=call_language):
-                        if delta:
-                            deltas.append(delta)
-                            if not first_token_noted:
-                                session.mark_first_token()  # T3
-                                first_token_noted = True
-                        if timing is not None:
-                            stage_timing = timing  # final sentinel
+
+                    # Run in executor — event loop stays responsive
+                    deltas, stage_timing = await _run_inference(
+                        engine, session.audio_buffer, call_language
+                    )
+
+                    if deltas and not first_token_noted:
+                        session.mark_first_token()  # T3
 
                     # ── Ty: inference end ──────────────────────────────
                     infer_duration_s = time.time() - t_infer_start
@@ -198,16 +229,13 @@ async def websocket_call_stream(websocket: WebSocket):
                         engine = get_engine()
                         t_infer_start = session.mark_infer_start()
                         first_token_noted = session.first_token_time is not None
-                        deltas = []
-                        stage_timing = None
-                        for delta, timing in engine.transcribe_stream(session.audio_buffer, language=call_language):
-                            if delta:
-                                deltas.append(delta)
-                                if not first_token_noted:
-                                    session.mark_first_token()
-                                    first_token_noted = True
-                            if timing is not None:
-                                stage_timing = timing
+
+                        deltas, stage_timing = await _run_inference(
+                            engine, session.audio_buffer, call_language
+                        )
+
+                        if deltas and not first_token_noted:
+                            session.mark_first_token()
                         infer_duration_s = time.time() - t_infer_start
                         cumulative_text = "".join(deltas)
                     else:

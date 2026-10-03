@@ -136,69 +136,25 @@ class LiveCallSession:
             self.first_token_time = time.time()  # T3
 
     # ── Silence / energy gate ──────────────────────────────────────────────
-    #
-    # Why 0.01? Silence/noise floor is typically < 0.003 RMS (~-50 dBFS).
-    # Low-energy noise (room tone, hiss) sits at 0.003-0.008 RMS.
-    # Diagnostic test showed RMS 0.004 noise still triggers hallucinations.
-    # Speech starts at ~0.01 RMS (-40 dBFS) and is typically 0.03-0.3 RMS.
-    # Raising from 0.003 → 0.01 closes the 0.003-0.01 noise band.
-    RMS_SPEECH_THRESHOLD: float = 0.01  # ~-40 dBFS; safe floor for real speech
+    RMS_SPEECH_THRESHOLD: float = 0.003  # ~-50 dBFS; speech is typically -30 to -10 dBFS
 
-    def has_speech(self, window_samples: int = 16000) -> bool:
-        """Return True if the audio buffer contains speech energy.
+    def has_speech(self, window_samples: int = 8000) -> bool:
+        """Return True if the most recent audio window contains speech energy.
 
-        Checks RMS energy of the last ``window_samples`` samples (default 1 s
-        at 16 kHz). Uses a threshold of 0.01 RMS (~-40 dBFS) — comfortably
-        above noise floor (~-60 to -50 dBFS) and below speech (~-30 dBFS).
+        Checks RMS energy of the last ``window_samples`` samples (default 0.5 s
+        at 16 kHz). Prevents the engine from running on silence or low-level
+        background noise — saving encoder + prefill + decode compute entirely.
 
-        The window covers 1 s by default so brief silences between words do
-        not suppress inference while a sentence is still being spoken.
+        Threshold rationale:
+          RMS 0.003 ≈ -50 dBFS.  Typical speech: -30 to -10 dBFS (RMS 0.03 – 0.3).
+          Background room noise: -60 to -50 dBFS (RMS 0.001 – 0.003).
+          Threshold sits between the two, giving a comfortable safety margin.
         """
         if len(self.audio_buffer) == 0:
             return False
         recent = self.audio_buffer[-window_samples:]
         rms = float(np.sqrt(np.mean(recent ** 2)))
         return rms > self.RMS_SPEECH_THRESHOLD
-
-    # ── Hallucination filter ───────────────────────────────────────────────
-    #
-    # Whisper-architecture models emit coherent but fabricated sentences when
-    # given silence, noise, or audio too short for reliable recognition.
-    # These are detected by checking if the output is suspiciously short or
-    # matches a known hallucination signal.
-    #
-    # Reference: github.com/openai/whisper/discussions/1536
-
-    # Minimum tokens a real transcription should produce per second of audio.
-    # Silence + hallucination typically produces 5-20 tokens regardless of
-    # audio length. Real speech at 150 wpm ≈ 2 tokens/s minimum.
-    MIN_TOKENS_PER_SECOND: float = 0.5  # if below this, discard as hallucination
-
-    def is_hallucination(
-        self,
-        text: str,
-        tokens_generated: int,
-        audio_duration_s: float,
-    ) -> bool:
-        """Return True if the output looks like a model hallucination.
-
-        Two signals:
-        1. Token density: real speech produces at least 0.5 tokens/s.
-           Hallucinations are short fixed phrases regardless of audio length.
-        2. Zero text: empty/whitespace after strip() is always discarded.
-
-        Parameters
-        ----------
-        text            : raw decoded text from the model
-        tokens_generated: number of subword tokens produced
-        audio_duration_s: duration of the audio that was transcribed
-        """
-        if not text.strip():
-            return True  # nothing produced
-        if audio_duration_s <= 0:
-            return True
-        token_density = tokens_generated / audio_duration_s
-        return token_density < self.MIN_TOKENS_PER_SECOND
 
     # ── VAD sentence chunking ──────────────────────────────────────────────
 

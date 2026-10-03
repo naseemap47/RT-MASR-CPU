@@ -180,8 +180,10 @@ async def websocket_call_stream(websocket: WebSocket):
                 })
 
                 # ── VAD-driven inference trigger ───────────────────────────
+                # Minimum 2 s (32000 samples) before first inference.
+                # Short clips reliably hallucinate in Whisper-architecture models.
                 if (
-                    len(session.audio_buffer) >= 8000
+                    len(session.audio_buffer) >= 32000
                     and stats["chunks_received"] % 2 == 0
                     and session.has_speech()        # skip silent/noise-only chunks
                 ):
@@ -204,7 +206,12 @@ async def websocket_call_stream(websocket: WebSocket):
                             session.mark_first_token()  # T3
                         infer_duration_s = time.time() - t_infer_start
 
-                        session.append_committed("".join(deltas))
+                        # Only commit if the output is not a hallucination
+                        utterance_text = "".join(deltas)
+                        audio_dur = len(utterance_audio) / 16000
+                        tokens = stage_timing["tokens_generated"] if stage_timing else 0
+                        if not session.is_hallucination(utterance_text, tokens, audio_dur):
+                            session.append_committed(utterance_text)
 
                     else:
                         # ── Interim path: open utterance, show partial result ─
@@ -221,11 +228,17 @@ async def websocket_call_stream(websocket: WebSocket):
                         infer_duration_s = time.time() - t_infer_start
 
                     # ── Build display text: committed + open-window interim ──
-                    interim = "".join(deltas) if deltas else ""
+                    interim_text = "".join(deltas) if deltas else ""
+                    audio_dur = len(session.audio_buffer) / 16000
+                    tokens = stage_timing["tokens_generated"] if stage_timing else 0
+                    # Suppress hallucinated interim text
+                    if session.is_hallucination(interim_text, tokens, audio_dur):
+                        interim_text = ""
+
                     new_text = (
                         session.committed_text
-                        + (" " if session.committed_text and interim else "")
-                        + interim
+                        + (" " if session.committed_text and interim_text else "")
+                        + interim_text
                     ).strip()
 
                     if new_text != cumulative_text:

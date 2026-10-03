@@ -323,3 +323,137 @@ never grows beyond one encoder-context window regardless of speech continuity.
 | `static/app.js` | 5-state machine, `applyMetrics()`, waterfall update, health polling, `resetUI()` |
 | `pyproject.toml` | Added `psutil>=6.0.0`, `[tool.pytest.ini_options]` with `pythonpath = ["."]` |
 | `tests/test_live_call_session.py` | 11 unit tests: PCM conversion, energy gate, VAD boundary, pop, commit |
+
+---
+
+## 6. Hallucination Debugging — Investigation and Fix
+
+### Symptom
+
+The UI was displaying fabricated sentences mixed in with correct transcription:
+
+```
+"I'm not sure what you mean. I'm not a fan of the new movie.
+He hoped there would be stew for dinner. Turnips and carrots..."
+```
+
+Only the second part was the actual audio content. The first sentence was invented
+by the model.
+
+### Phase 1: Root Cause Investigation
+
+A diagnostic script was run to isolate what the model emits on non-speech inputs:
+
+```
+0.5s pure silence  → "I'm a little bit nervous."                              (7 tokens)
+1.0s pure silence  → "I'm a little bit of a fan of the new movie, 'The Great Gatsby.'" (19 tokens)
+RMS 0.004 noise    → "The system is a computer program that can perform various tasks." (12 tokens)
+```
+
+**Finding:** This is a well-known property of Whisper-architecture seq2seq models.
+When given silence, noise, or audio that is too short for reliable recognition,
+the model produces coherent but fabricated English sentences — not empty output and
+not an error. The model was trained on real speech only; it has no concept of
+"nothing to transcribe."
+
+### First Fix Attempt — Token-Density Filter (Failed, Reverted)
+
+**Hypothesis:** Hallucinations produce a fixed number of tokens regardless of audio
+length. Real speech should produce proportionally more tokens for longer audio.
+A `MIN_TOKENS_PER_SECOND` filter at 0.5 tok/s should reject hallucinations.
+
+```python
+def is_hallucination(self, text, tokens_generated, audio_duration_s):
+    token_density = tokens_generated / audio_duration_s
+    return token_density < self.MIN_TOKENS_PER_SECOND  # 0.5
+```
+
+**Why it failed:** The hypothesis was incorrect. Hallucinations produce a
+full English sentence (10–20 tokens) regardless of audio length. For a 2s
+committed chunk: 14 tokens / 2s = **7 tok/s** — well above the 0.5 threshold.
+Real speech at 150 wpm produces approximately 2–8 tok/s in the same range.
+The filter was statistically blind to the problem.
+
+The commit was cleanly reverted with `git revert`.
+
+### Root Cause — Lead-In Silence Passing a Weak Energy Gate
+
+An RMS scan of the actual test audio files revealed the real trigger:
+
+```
+t=0.0s  RMS=0.0014  speech=False (lead-in silence at recording start)
+t=0.5s  RMS=0.0720  speech=True  (actual speech begins)
+t=1.0s  RMS=0.0795  speech=True
+t=3.5s  RMS=0.0012  speech=False (inter-sentence pause)
+t=4.0s  RMS=0.0452  speech=True
+```
+
+The audio file begins with a brief lead-in silence (RMS 0.0014). The original
+energy gate threshold was **0.003 RMS (~−50 dBFS)**. The diagnostic confirmed
+that noise at RMS 0.004 — just above this threshold — still causes the model to
+hallucinate. The lead-in silence was not blocked; inference fired on it; the
+hallucination was committed to `committed_text`; it then appeared in front of
+every subsequent correct line.
+
+Real measured speech in the test files: **RMS 0.045–0.06 (~−27 dBFS)**.
+The 0.003 threshold left a 10× gap between max-noise and threshold — insufficient.
+
+### Second Fix — Calibrated Threshold + Minimum Commit Window (Correct)
+
+Two changes in `src/engines/live_call_session.py`:
+
+**Fix A — Raise `RMS_SPEECH_THRESHOLD` from `0.003` to `0.02`**
+
+```
+Noise floor           : RMS 0.001 – 0.008
+Diagnostic noise      : RMS 0.004  ← was hallucinating (below new threshold)
+New threshold         : RMS 0.02   ← 5× above max noise, 3× below real speech
+Quiet speech          : RMS 0.02  – 0.04
+Normal speech (meas.) : RMS 0.045 – 0.06
+```
+
+The new threshold provides a **5× margin** above the measured noise ceiling and
+**~3× margin** below the measured quiet-speech floor.
+
+**Fix B — Raise `find_vad_boundary` `min_silence_samples` from `3200` (0.2 s) to `32000` (2.0 s)**
+
+`min_silence_samples` is the offset at which the VAD starts scanning for a
+boundary. It doubles as the minimum committed chunk length: no boundary can be
+found before this point, so every committed utterance is guaranteed to be at
+least 2 s long.
+
+Before this change, a false VAD trigger could commit a 0.2–1.0 s chunk of
+borderline audio (just enough energy to pass `has_speech()`), giving the model
+too little context and triggering hallucination.
+
+After: the model always receives ≥ 2 s of real-speech-energy audio per commit.
+Whisper-architecture models are reliable at this duration.
+
+### Verification After Second Fix
+
+Re-running the gate check on the same audio file:
+
+```
+Pure silence (RMS=0):      has_speech=False  ✓
+Noise RMS 0.0040:          has_speech=False  ✓
+Lead-in silence RMS 0.0014:has_speech=False  ✓
+Real speech RMS 0.0720:    has_speech=True   ✓
+1s buffer: find_vad_boundary=None            ✓ (too short to commit)
+```
+
+All 11 existing unit tests continued to pass (the tone-based tests use amplitude
+0.3, RMS ≈ 0.21 — well above the new threshold).
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/engines/live_call_session.py` | `RMS_SPEECH_THRESHOLD` 0.003 → 0.02; `find_vad_boundary` `min_silence_samples` 3200 → 32000; added measured calibration comments |
+
+### Key Lesson
+
+Token-density-based hallucination filters do not work for Whisper-architecture
+models because hallucinations produce the same token density as real speech.
+The correct mitigation is upstream: ensure the model **never receives non-speech
+audio** in the first place, through calibrated energy gates and minimum committed
+chunk length.

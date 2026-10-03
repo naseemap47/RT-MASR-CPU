@@ -179,8 +179,12 @@ async def websocket_call_stream(websocket: WebSocket):
                     "total_bytes": stats["total_bytes"],
                 })
 
-                # Run inference every 2 chunks once we have >= 0.5 s of audio
-                if len(session.audio_buffer) >= 8000 and stats["chunks_received"] % 2 == 0:
+                # Run inference every 2 chunks once we have >= 0.5 s of speech
+                if (
+                    len(session.audio_buffer) >= 8000
+                    and stats["chunks_received"] % 2 == 0
+                    and session.has_speech()        # skip silent/noise-only chunks
+                ):
                     engine = get_engine()
 
                     # ── T2: mark inference start ───────────────────────

@@ -131,6 +131,27 @@ class LiveCallSession:
         if self.first_token_time is None:
             self.first_token_time = time.time()  # T3
 
+    # ── Silence / energy gate ──────────────────────────────────────────────
+    RMS_SPEECH_THRESHOLD: float = 0.003  # ~-50 dBFS; speech is typically -30 to -10 dBFS
+
+    def has_speech(self, window_samples: int = 8000) -> bool:
+        """Return True if the most recent audio window contains speech energy.
+
+        Checks RMS energy of the last ``window_samples`` samples (default 0.5 s
+        at 16 kHz). Prevents the engine from running on silence or low-level
+        background noise — saving encoder + prefill + decode compute entirely.
+
+        Threshold rationale:
+          RMS 0.003 ≈ -50 dBFS.  Typical speech: -30 to -10 dBFS (RMS 0.03 – 0.3).
+          Background room noise: -60 to -50 dBFS (RMS 0.001 – 0.003).
+          Threshold sits between the two, giving a comfortable safety margin.
+        """
+        if len(self.audio_buffer) == 0:
+            return False
+        recent = self.audio_buffer[-window_samples:]
+        rms = float(np.sqrt(np.mean(recent ** 2)))
+        return rms > self.RMS_SPEECH_THRESHOLD
+
     def get_metrics(
         self,
         infer_duration_s: float,

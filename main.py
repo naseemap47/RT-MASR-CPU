@@ -179,30 +179,55 @@ async def websocket_call_stream(websocket: WebSocket):
                     "total_bytes": stats["total_bytes"],
                 })
 
-                # Run inference every 2 chunks once we have >= 0.5 s of speech
+                # ── VAD-driven inference trigger ───────────────────────────
                 if (
                     len(session.audio_buffer) >= 8000
                     and stats["chunks_received"] % 2 == 0
                     and session.has_speech()        # skip silent/noise-only chunks
                 ):
                     engine = get_engine()
+                    boundary = session.find_vad_boundary()
 
-                    # ── T2: mark inference start ───────────────────────
-                    t_infer_start = session.mark_infer_start()
-                    first_token_noted = session.first_token_time is not None
+                    if boundary is not None:
+                        # ── Commit path: utterance boundary detected ────────
+                        # Transcribe only the completed utterance, then discard
+                        # those samples — inference time stays bounded.
+                        t_infer_start = session.mark_infer_start()
+                        first_token_noted = session.first_token_time is not None
+                        utterance_audio = session.pop_utterance(boundary)
 
-                    # Run in executor — event loop stays responsive
-                    deltas, stage_timing = await _run_inference(
-                        engine, session.audio_buffer, call_language
-                    )
+                        deltas, stage_timing = await _run_inference(
+                            engine, utterance_audio, call_language
+                        )
 
-                    if deltas and not first_token_noted:
-                        session.mark_first_token()  # T3
+                        if deltas and not first_token_noted:
+                            session.mark_first_token()  # T3
+                        infer_duration_s = time.time() - t_infer_start
 
-                    # ── Ty: inference end ──────────────────────────────
-                    infer_duration_s = time.time() - t_infer_start
+                        session.append_committed("".join(deltas))
 
-                    new_text = "".join(deltas)
+                    else:
+                        # ── Interim path: open utterance, show partial result ─
+                        # Re-transcribe only the current (bounded) window.
+                        t_infer_start = session.mark_infer_start()
+                        first_token_noted = session.first_token_time is not None
+
+                        deltas, stage_timing = await _run_inference(
+                            engine, session.audio_buffer, call_language
+                        )
+
+                        if deltas and not first_token_noted:
+                            session.mark_first_token()  # T3
+                        infer_duration_s = time.time() - t_infer_start
+
+                    # ── Build display text: committed + open-window interim ──
+                    interim = "".join(deltas) if deltas else ""
+                    new_text = (
+                        session.committed_text
+                        + (" " if session.committed_text and interim else "")
+                        + interim
+                    ).strip()
+
                     if new_text != cumulative_text:
                         cumulative_text = new_text
                         metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
@@ -228,7 +253,10 @@ async def websocket_call_stream(websocket: WebSocket):
 
                 elif msg_type == "end_call":
                     total_call_time = time.time() - session.start_time
+                    stage_timing = None
+                    infer_duration_s = 0.0
 
+                    # Flush any remaining audio in the open-utterance buffer
                     if len(session.audio_buffer) > 0:
                         engine = get_engine()
                         t_infer_start = session.mark_infer_start()
@@ -241,11 +269,14 @@ async def websocket_call_stream(websocket: WebSocket):
                         if deltas and not first_token_noted:
                             session.mark_first_token()
                         infer_duration_s = time.time() - t_infer_start
-                        cumulative_text = "".join(deltas)
-                    else:
-                        infer_duration_s = 0.0
-                        stage_timing = None
 
+                        # Commit trailing audio; clear the buffer
+                        trailing = "".join(deltas).strip()
+                        if trailing:
+                            session.append_committed(trailing)
+                        session.audio_buffer = session.audio_buffer[:0]
+
+                    cumulative_text = session.committed_text
                     metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
                     metrics["total_call_time_s"] = round(total_call_time, 2)
 

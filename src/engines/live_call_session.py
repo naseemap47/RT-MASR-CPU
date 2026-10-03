@@ -67,6 +67,9 @@ class LiveCallSession:
         # ── Memory snapshot ────────────────────────────────────────────────
         self._peak_rss_start_kb: int = self._rss_kb()
 
+        # ── VAD / utterance state ──────────────────────────────────────────
+        self.committed_text: str = ""   # finalised utterance transcripts
+
     # ──────────────────────────────────────────────────────────────────────
     # Internal helpers
     # ──────────────────────────────────────────────────────────────────────
@@ -94,6 +97,7 @@ class LiveCallSession:
         self.inference_passes = 0
         self.audio_buffer = np.array([], dtype=np.float32)
         self._peak_rss_start_kb = self._rss_kb()
+        self.committed_text = ""
 
     def process_pcm_bytes(self, raw_bytes: bytes) -> Dict[str, Any]:
         """Convert int16 PCM bytes to float32 and accumulate into audio buffer.
@@ -151,6 +155,69 @@ class LiveCallSession:
         recent = self.audio_buffer[-window_samples:]
         rms = float(np.sqrt(np.mean(recent ** 2)))
         return rms > self.RMS_SPEECH_THRESHOLD
+
+    # ── VAD sentence chunking ──────────────────────────────────────────────
+
+    def find_vad_boundary(
+        self,
+        min_silence_samples: int = 3200,      # 0.2 s at 16 kHz
+        max_utterance_samples: int = 240000,  # 15 s at 16 kHz
+    ) -> int | None:
+        """Detect a silence boundary in audio_buffer suitable for committing.
+
+        Scans the buffer for a run of low-energy frames long enough to be a
+        natural pause, in the range [min_silence_samples, max_utterance_samples].
+
+        Returns the sample index of the detected boundary, or None if no
+        clean boundary exists yet (utterance still in progress).
+
+        Forcing: if the buffer exceeds max_utterance_samples, the boundary
+        is forced at that limit to prevent unbounded growth.
+        """
+        buf = self.audio_buffer
+        if len(buf) < min_silence_samples * 2:
+            return None  # not enough audio to make a judgement
+
+        # Force-commit if the buffer has grown too long
+        if len(buf) >= max_utterance_samples:
+            return max_utterance_samples
+
+        # Scan in 100 ms (1600 sample) hops for a silent frame
+        hop = 1600
+        frame_rms_sq_thresh = self.RMS_SPEECH_THRESHOLD ** 2
+        search_start = min_silence_samples
+
+        for i in range(search_start, len(buf) - hop, hop):
+            frame = buf[i: i + hop]
+            if float(np.mean(frame ** 2)) < frame_rms_sq_thresh:
+                # Found a quiet frame — use its midpoint as the boundary
+                return i + hop // 2
+
+        return None  # boundary not yet found
+
+    def pop_utterance(self, boundary: int) -> np.ndarray:
+        """Remove and return audio_buffer[0:boundary], leaving the remainder.
+
+        Called after find_vad_boundary() returns a boundary index. The
+        returned array is the completed utterance to transcribe finally.
+        The remaining audio_buffer becomes the start of the next utterance.
+        """
+        utterance = self.audio_buffer[:boundary].copy()
+        self.audio_buffer = self.audio_buffer[boundary:]
+        return utterance
+
+    def append_committed(self, text: str) -> None:
+        """Append a finalised utterance to committed_text.
+
+        Strips the text and joins with a single space to build the growing
+        committed transcript. Empty / whitespace-only strings are ignored.
+        """
+        text = text.strip()
+        if text:
+            if self.committed_text:
+                self.committed_text += " " + text
+            else:
+                self.committed_text = text
 
     def get_metrics(
         self,

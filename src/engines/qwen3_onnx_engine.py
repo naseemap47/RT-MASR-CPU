@@ -26,6 +26,17 @@ from utils.audio_utils import (
 )
 from core.config import load_config
 
+
+def _ort_graph_opt(level_str: str) -> ort.GraphOptimizationLevel:
+    """Convert the config string to an ORT GraphOptimizationLevel enum value."""
+    _map = {
+        "none":     ort.GraphOptimizationLevel.ORT_DISABLE_ALL,
+        "basic":    ort.GraphOptimizationLevel.ORT_ENABLE_BASIC,
+        "extended": ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED,
+        "all":      ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
+    }
+    return _map.get((level_str or "all").lower(), ort.GraphOptimizationLevel.ORT_ENABLE_ALL)
+
 # ── Constants ───────────────────────────────────────────────────────────
 
 SAMPLE_RATE = 16000
@@ -103,15 +114,33 @@ class SimpleTokenizer:
 class OnnxAsrPipeline:
     """End-to-end ASR pipeline using only ONNX Runtime."""
 
-    def __init__(self, onnx_dir: str = "models/qwen3-asr-onnx", num_threads: int = 0,
-                 quantize: str = "int8"):
+    def __init__(
+        self,
+        onnx_dir: str = "models/qwen3-asr-onnx",
+        num_threads: int = 0,
+        quantize: str = "int8",
+        ort_session: dict | None = None,
+    ):
+        """
+        Args:
+            onnx_dir:    Directory containing all ONNX model artefacts.
+            num_threads: ORT intra-op thread count (0 = auto).
+            quantize:    Decoder precision: "int8" | "fp32".
+            ort_session: Optional dict from the ``ort_session`` config section:
+                         { graph_optimization_level, log_severity_level, providers }
+        """
         onnx_path = Path(onnx_dir)
+        ort_cfg = ort_session or {}
 
         sess_opts = ort.SessionOptions()
-        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_opts.graph_optimization_level = _ort_graph_opt(
+            ort_cfg.get("graph_optimization_level", "all")
+        )
         if num_threads > 0:
             sess_opts.intra_op_num_threads = num_threads
-        sess_opts.log_severity_level = 3  # Suppress warnings
+        sess_opts.log_severity_level = int(ort_cfg.get("log_severity_level", 3))
+
+        providers = ort_cfg.get("providers", ["CPUExecutionProvider"])
 
         # Choose decoder model files based on quantization
         if quantize == "int8" and (onnx_path / "decoder_init.int8.onnx").exists():
@@ -124,17 +153,13 @@ class OnnxAsrPipeline:
             print(f"Loading ONNX models (decoder: FP32)...")
 
         self.encoder_conv = ort.InferenceSession(
-            str(onnx_path / "encoder_conv.onnx"), sess_opts,
-            providers=["CPUExecutionProvider"])
+            str(onnx_path / "encoder_conv.onnx"), sess_opts, providers=providers)
         self.encoder_transformer = ort.InferenceSession(
-            str(onnx_path / "encoder_transformer.onnx"), sess_opts,
-            providers=["CPUExecutionProvider"])
+            str(onnx_path / "encoder_transformer.onnx"), sess_opts, providers=providers)
         self.decoder_init = ort.InferenceSession(
-            str(onnx_path / decoder_init_path), sess_opts,
-            providers=["CPUExecutionProvider"])
+            str(onnx_path / decoder_init_path), sess_opts, providers=providers)
         self.decoder_step = ort.InferenceSession(
-            str(onnx_path / decoder_step_path), sess_opts,
-            providers=["CPUExecutionProvider"])
+            str(onnx_path / decoder_step_path), sess_opts, providers=providers)
 
         # Load embedding matrix
         embed_path = onnx_path / "embed_tokens.bin"
@@ -507,30 +532,104 @@ class OnnxAsrPipeline:
 
 
 class ONNXQwen3ASR:
+    """
+    ONNX Runtime ASR engine for Qwen3-ASR-0.6B.
+
+    Can be instantiated directly with keyword arguments or via
+    :meth:`from_config` / :meth:`from_config_path` to load all settings
+    from a model YAML file.
+    """
+
     def __init__(
-        self, onnx_dir: str = "models/qwen3-asr-onnx", num_threads: int = 0,
-        quantize: Literal["int8", "fp32"] = "int8", language: Optional[str] = None,
+        self,
+        onnx_dir: str = "models/qwen3-asr-onnx",
+        num_threads: int = 0,
+        quantize: Literal["int8", "fp32"] = "int8",
+        language: Optional[str] = None,
+        ort_session: dict | None = None,
+        # inference defaults (read from config, overridable per-call)
+        max_new_tokens: int = 512,
+        chunk_sec: int = 30,
     ):
         self.pipeline = OnnxAsrPipeline(
-            onnx_dir, num_threads, quantize
+            onnx_dir=onnx_dir,
+            num_threads=num_threads,
+            quantize=quantize,
+            ort_session=ort_session,
         )
         self.language = normalize_language(language)
+        self._default_max_new_tokens = max_new_tokens
+        self._default_chunk_sec = chunk_sec
+
+    # ------------------------------------------------------------------
+    # Config-driven constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "ONNXQwen3ASR":
+        """
+        Build an ONNXQwen3ASR instance from a pre-loaded model config dict
+        (the contents of e.g. config/models/qwen3_onnx.yaml).
+
+        Args:
+            cfg: Dict loaded from the per-model YAML.
+
+        Returns:
+            Configured ONNXQwen3ASR instance.
+        """
+        engine_cfg   = cfg.get("engine",    {})
+        infer_cfg    = cfg.get("inference", {})
+        ort_cfg      = cfg.get("ort_session", {})
+
+        return cls(
+            onnx_dir       = engine_cfg.get("onnx_dir",     "models/qwen3-asr-onnx"),
+            num_threads    = engine_cfg.get("num_threads",  0),
+            quantize       = engine_cfg.get("quantize",     "int8"),
+            language       = engine_cfg.get("language",     None),
+            ort_session    = ort_cfg or None,
+            max_new_tokens = infer_cfg.get("max_new_tokens", 512),
+            chunk_sec      = infer_cfg.get("chunk_sec",      30),
+        )
+
+    @classmethod
+    def from_config_path(cls, config_path: str) -> "ONNXQwen3ASR":
+        """
+        Load a model YAML file and construct the engine.
+
+        Args:
+            config_path: Path to the per-model YAML,
+                         e.g. ``"config/models/qwen3_onnx.yaml"``.
+
+        Returns:
+            Configured ONNXQwen3ASR instance.
+        """
+        cfg = load_config(config_path)
+        return cls.from_config(cfg)
+
+    # ------------------------------------------------------------------
+    # Inference API
+    # ------------------------------------------------------------------
 
     def transcribe(
         self,
         audio_path: str,
-        max_new_tokens: int = 512,
-        chunk_sec: int = 30,
+        max_new_tokens: int | None = None,
+        chunk_sec: int | None = None,
         language: Optional[str] = None,
     ) -> dict:
         lang = normalize_language(language) if language is not None else self.language
-        return self.pipeline.transcribe(audio_path, lang, max_new_tokens, chunk_sec)
+        return self.pipeline.transcribe(
+            audio_path,
+            lang,
+            max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
+            chunk_sec      if chunk_sec      is not None else self._default_chunk_sec,
+        )
 
     def transcribe_stream(
         self,
         audio: Union[str, Path, np.ndarray],
         language: Optional[str] = None,
-        max_new_tokens: int = 512,
+        max_new_tokens: int | None = None,
     ) -> Generator[tuple, None, None]:
         """Stream real-time transcription for an audio file path or numpy array.
 
@@ -538,7 +637,11 @@ class ONNXQwen3ASR:
         ``OnnxAsrPipeline.transcribe_stream`` for the full contract.
         """
         lang = normalize_language(language) if language is not None else self.language
-        yield from self.pipeline.transcribe_stream(audio, lang, max_new_tokens)
+        yield from self.pipeline.transcribe_stream(
+            audio,
+            lang,
+            max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
+        )
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

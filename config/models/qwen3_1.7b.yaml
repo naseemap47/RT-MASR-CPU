@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/qwen3_1.7b.yaml
+#
+# Qwen3-ASR-1.7B  —  Transformers / CPU backend
+#   Engine  : Qwen3ASR   (src/engines/qwen3_engine.py)
+#   HF repo : Qwen/Qwen3-ASR-1.7B
+#   Local   : models/qwen3-asr-1.7b
+#   Download: DownloadModels().qwen3_0_6b_asr_models(
+#               repo_id="Qwen/Qwen3-ASR-1.7B",
+#               local_dir="models/qwen3-asr-1.7b")
+#
+#   vs 0.6B: higher accuracy, ~3× larger weights, slower on CPU.
+#            Increase max_new_tokens for longer / denser speech.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "qwen3_1.7b"
+display_name: "Qwen3-ASR-1.7B [bfloat16 (BF16)] (Transformers / CPU)"
+backend: "transformers"          # → loads src/engines/qwen3_engine.py :: Qwen3ASR
+
+download:
+  repo_id: "Qwen/Qwen3-ASR-1.7B"
+  local_dir: "models/qwen3-asr-1.7b"
+  method: "snapshot"             # uses DownloadModels.qwen3_0_6b_asr_models()
+
+engine:
+  model_path: "models/qwen3-asr-1.7b"
+  dtype: "bfloat16"              # "bfloat16" | "float32"
+  device_map: "cpu"
+  max_inference_batch_size: 1
+  max_new_tokens: 384            # larger model → longer output capacity
+  language: null                 # null = auto-detect; "English" | "Mandarin" | "Indonesian"
+
+inference:
+  max_new_tokens: 384
+  chunk_sec: 30
+
+audio:
+  sample_rate: 16000
+  min_chunk_samples: 8000        # 0.5 s @ 16 kHz — shorter chunks are zero-padded
+
+streaming:
+  min_buffer_samples: 8000
+  infer_every_n_chunks: 2

@@ -1,0 +1,57 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/qwen3_onnx.yaml
+#
+# Qwen3-ASR-0.6B-ONNX  —  Pure ONNX Runtime backend (no PyTorch)
+#   Engine  : ONNXQwen3ASR  (src/engines/qwen3_onnx_engine.py)
+#   HF repo : Daumee/Qwen3-ASR-0.6B-ONNX-CPU
+#   Local   : models/qwen3-asr-onnx
+#   Download: DownloadModels().qwen3_0_6b_asr_onnx_model(
+#               repo_id="Daumee/Qwen3-ASR-0.6B-ONNX-CPU",
+#               target_dir="models/qwen3-asr-onnx")
+#
+#   vs Transformers backends: faster on CPU, no PyTorch dependency,
+#   true token-streaming (character-by-character deltas), supports INT8 decoder.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "qwen3_onnx"
+display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
+backend: "onnx"                  # → loads src/engines/qwen3_onnx_engine.py :: ONNXQwen3ASR
+
+download:
+  repo_id: "Daumee/Qwen3-ASR-0.6B-ONNX-CPU"
+  target_dir: "models/qwen3-asr-onnx"
+  method: "onnx"                 # uses DownloadModels.qwen3_0_6b_asr_onnx_model()
+  required_files:
+    - "decoder_init.int8.onnx"
+    - "decoder_step.int8.onnx"
+    - "embed_tokens.bin"
+    - "encoder_conv.onnx"
+    - "encoder_conv.onnx.data"
+    - "encoder_transformer.onnx"
+    - "encoder_transformer.onnx.data"
+    - "tokenizer.json"
+
+engine:
+  onnx_dir: "models/qwen3-asr-onnx"
+  num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
+  quantize: "int8"               # "int8" | "fp32"  (int8 decoder is smaller and faster)
+  language: null                 # null = auto-detect; "English" | "Mandarin" | "Indonesian"
+
+inference:
+  max_new_tokens: 512
+  chunk_sec: 30                  # seconds per window for silence-split long audio
+
+audio:
+  sample_rate: 16000
+  n_mels: 128                    # fixed by the exported ONNX encoder graph
+  encoder_chunk_size: 100        # mel frames per ONNX encoder call (CHUNK_SIZE constant)
+
+ort_session:
+  graph_optimization_level: "all"   # ORT_ENABLE_ALL — recommended for CPU
+  log_severity_level: 3             # 0=verbose … 3=error (suppresses ORT deprecation noise)
+  providers:
+    - "CPUExecutionProvider"
+
+streaming:
+  min_buffer_samples: 8000       # trigger inference after ≥0.5 s buffered
+  infer_every_n_chunks: 2        # throttle: run inference every N PCM chunks

@@ -11,11 +11,12 @@ dependencies = [
     "onnxruntime>=1.30.0",
     "pytest>=9.1.1",
     "soundfile>=0.14.0",
-    "tokenizers>=0.23.2",
-    "transformers>=5.18.0",
+    "tokenizers>=0.22.0",
+    "transformers==4.57.6",
     "uvicorn>=0.54.0",
     "websockets>=17.1",
     "psutil>=6.0.0",
+    "qwen-asr>=0.0.6",
 ]
 
 [build-system]

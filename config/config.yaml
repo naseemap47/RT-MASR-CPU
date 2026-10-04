@@ -1,0 +1,26 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/config.yaml  —  RT-MASR server top-level configuration
+#
+# Model variants and their per-model settings live in config/models/:
+#   config/models/qwen3.yaml        ← model registry (all three variants)
+#   config/models/qwen3_onnx.yaml   ← ONNX backend    (ONNXQwen3ASR)
+#   config/models/qwen3_0.6b.yaml   ← Transformers 0.6B (Qwen3ASR)
+#   config/models/qwen3_1.7b.yaml   ← Transformers 1.7B (Qwen3ASR)
+# ──────────────────────────────────────────────────────────────────────────────
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  log_level: "info"
+
+# Active model — must match a "name" entry in config/models/qwen3.yaml registry.
+#
+#   "qwen3_onnx"   — ONNX Runtime, INT8 decoder, fastest on CPU, no PyTorch
+#   "qwen3_0.6b"   — Transformers 0.6B, balanced speed/accuracy, needs PyTorch
+#   "qwen3_1.7b"   — Transformers 1.7B, highest accuracy, slowest on CPU
+default_model: "qwen3_1.7b"
+
+# Registry file that lists all available model variants.
+model_registry: "config/models/qwen3.yaml"
+
+default_pipeline: "streaming_pcm"

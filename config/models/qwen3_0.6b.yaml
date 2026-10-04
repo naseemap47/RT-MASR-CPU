@@ -1,0 +1,40 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/qwen3_0.6b.yaml
+#
+# Qwen3-ASR-0.6B  —  Transformers / CPU backend
+#   Engine  : Qwen3ASR   (src/engines/qwen3_engine.py)
+#   HF repo : Qwen/Qwen3-ASR-0.6B
+#   Local   : models/qwen3-asr-0.6b
+#   Download: DownloadModels().qwen3_0_6b_asr_models(
+#               repo_id="Qwen/Qwen3-ASR-0.6B",
+#               local_dir="models/qwen3-asr-0.6b")
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "qwen3_0.6b"
+display_name: "Qwen3-ASR-0.6B [bfloat16 (BF16)] (Transformers / CPU)"
+backend: "transformers"          # → loads src/engines/qwen3_engine.py :: Qwen3ASR
+
+download:
+  repo_id: "Qwen/Qwen3-ASR-0.6B"
+  local_dir: "models/qwen3-asr-0.6b"
+  method: "snapshot"             # uses DownloadModels.qwen3_0_6b_asr_models()
+
+engine:
+  model_path: "models/qwen3-asr-0.6b"
+  dtype: "bfloat16"              # "bfloat16" | "float32"  ("float16" not recommended on CPU)
+  device_map: "cpu"
+  max_inference_batch_size: 1
+  max_new_tokens: 256
+  language: null                 # null = auto-detect; "English" | "Mandarin" | "Indonesian"
+
+inference:
+  max_new_tokens: 256
+  chunk_sec: 30                  # seconds per window for long-audio splitting
+
+audio:
+  sample_rate: 16000
+  min_chunk_samples: 8000        # 0.5 s @ 16 kHz — shorter chunks are zero-padded
+
+streaming:
+  min_buffer_samples: 8000       # trigger inference after ≥0.5 s buffered
+  infer_every_n_chunks: 2        # throttle: run inference every N PCM chunks

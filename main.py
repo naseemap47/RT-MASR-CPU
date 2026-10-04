@@ -13,6 +13,14 @@ by wrapping OnnxAsrPipeline._transcribe_chunk via a patched transcribe_stream th
 also returns timing info. Because transcribe_stream is a generator, we collect all
 deltas, then call _transcribe_chunk for timing (one extra pass is wasteful), so
 instead we time sub-phases directly via the session.
+
+Backend selection
+-----------------
+The active inference backend is chosen by ``default_model`` in config/config.yaml:
+  "qwen3_onnx"   → ONNXQwen3ASR   (src/engines/qwen3_onnx_engine.py)
+  "qwen3_0.6b"   → Qwen3ASR 0.6B  (src/engines/qwen3_engine.py)
+  "qwen3_1.7b"   → Qwen3ASR 1.7B  (src/engines/qwen3_engine.py)
+Change the YAML key to switch backends without touching this file.
 """
 
 import asyncio
@@ -22,25 +30,78 @@ import psutil
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from src.engines.qwen3_onnx_engine import ONNXQwen3ASR
+from src.core.config import resolve_model_config, load_server_config
 from src.engines.live_call_session import LiveCallSession
 
-_engine: Optional[ONNXQwen3ASR] = None
+# ── Config paths ──────────────────────────────────────────────────────────────
+CONFIG_PATH = "config/config.yaml"
+
+# ── Type alias for either engine ──────────────────────────────────────────────
+ASREngine = Union["ONNXQwen3ASR", "Qwen3ASR"]  # noqa: F821  (resolved at runtime)
+
+_engine: Optional[ASREngine] = None
 _model_ready: bool = False
+_active_model_name: str = "(not loaded)"
+_active_backend: str = "(unknown)"
+
+
+def _build_engine(model_cfg: dict) -> ASREngine:
+    """
+    Instantiate the correct engine class based on the ``backend`` field
+    in the resolved per-model config dict.
+
+    Args:
+        model_cfg: Per-model config dict (from resolve_model_config).
+
+    Returns:
+        A fully constructed engine instance (ONNXQwen3ASR or Qwen3ASR).
+
+    Raises:
+        ValueError: If the backend discriminator is unknown.
+    """
+    backend = model_cfg.get("backend", "onnx")
+
+    if backend == "onnx":
+        from src.engines.qwen3_onnx_engine import ONNXQwen3ASR
+        return ONNXQwen3ASR.from_config(model_cfg)
+
+    elif backend == "transformers":
+        from src.engines.qwen3_engine import Qwen3ASR
+        return Qwen3ASR.from_config(model_cfg)
+
+    else:
+        raise ValueError(
+            f"Unknown backend '{backend}' in model config. "
+            "Expected 'onnx' or 'transformers'."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _engine, _model_ready
-    print("Preloading ONNX Qwen3 ASR Model Pipeline...")
-    _engine = ONNXQwen3ASR()
+    global _engine, _model_ready, _active_model_name, _active_backend
+
+    model_cfg = resolve_model_config(CONFIG_PATH)
+    _active_model_name = model_cfg.get("display_name", model_cfg.get("name", "?"))
+    _active_backend    = model_cfg.get("backend", "?")
+
+    print(f"Loading ASR engine: {_active_model_name} (backend={_active_backend}) ...")
+    _engine = _build_engine(model_cfg)
     _model_ready = True
-    print("ONNX Qwen3 ASR Model Pipeline Preloaded and Ready.")
+    print(f"Engine ready: {_active_model_name}")
     yield
+
+
+def get_engine() -> ASREngine:
+    global _engine
+    if _engine is None:
+        model_cfg = resolve_model_config(CONFIG_PATH)
+        _engine = _build_engine(model_cfg)
+    return _engine
 
 app = FastAPI(title="RT-MASR Live Voice-Call Simulation", lifespan=lifespan)
 
@@ -48,11 +109,6 @@ static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-def get_engine() -> ONNXQwen3ASR:
-    global _engine
-    if _engine is None:
-        _engine = ONNXQwen3ASR()
-    return _engine
 
 @app.get("/")
 def get_ui():
@@ -61,6 +117,7 @@ def get_ui():
         return FileResponse(index_path)
     return JSONResponse({"message": "RT-MASR Web UI Server Ready"})
 
+
 @app.get("/api/health")
 def check_health():
     proc = psutil.Process(os.getpid())
@@ -68,6 +125,8 @@ def check_health():
     return JSONResponse({
         "status": "ok",
         "model_ready": _model_ready,
+        "active_model": _active_model_name,
+        "backend": _active_backend,
         "cpu_percent": proc.cpu_percent(interval=None),
         "rss_mb": round(mem_info.rss / 1_048_576, 1),
         "vms_mb": round(mem_info.vms / 1_048_576, 1),
@@ -112,7 +171,7 @@ def get_sample_file(filepath: str):
     return JSONResponse({"error": "File not found"}, status_code=404)
 
 async def _run_inference(
-    engine: ONNXQwen3ASR,
+    engine: ASREngine,
     audio_buffer: "np.ndarray",
     language: Optional[str],
 ) -> tuple[list[str], dict | None]:

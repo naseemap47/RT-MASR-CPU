@@ -24,7 +24,7 @@ from pathlib import Path
 # ── make sure we can import the package from project root ──────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.engines.qwen3_engine import ONNXQwen3ASR
+from src.engines.qwen3_onnx_engine import ONNXQwen3ASR
 
 AUDIO_FILE = "test_audio/en/librispeech_0_1089_0.wav"
 LANGUAGE   = "English"

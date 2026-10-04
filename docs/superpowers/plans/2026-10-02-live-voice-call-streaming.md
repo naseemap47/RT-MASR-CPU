@@ -25,7 +25,7 @@
 - Test: `tests/test_live_call_session.py`
 
 **Interfaces:**
-- Consumes: `ONNXQwen3ASR` from `src.engines.qwen3_engine`
+- Consumes: `ONNXQwen3ASR` from `src.engines.qwen3_onnx_engine`
 - Produces: `LiveCallSession` class with methods `process_pcm_bytes(raw_bytes: bytes)`, `finish()`, and properties `buffered_seconds`, `call_metrics`.
 
 - [ ] **Step 1: Write the failing test**
@@ -120,7 +120,7 @@ git commit -m "feat: add LiveCallSession manager for PCM audio buffering"
 - Test: `tests/test_server.py`
 
 **Interfaces:**
-- Consumes: `LiveCallSession` from `src.engines.live_call_session`, `ONNXQwen3ASR` from `src.engines.qwen3_engine`
+- Consumes: `LiveCallSession` from `src.engines.live_call_session`, `ONNXQwen3ASR` from `src.engines.qwen3_onnx_engine`
 - Produces: FastAPI app with `/`, `/api/samples`, `/api/samples/{filename}`, `/ws/call-stream`
 
 - [ ] **Step 1: Write the failing test**
@@ -162,7 +162,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from src.engines.qwen3_engine import ONNXQwen3ASR
+from src.engines.qwen3_onnx_engine import ONNXQwen3ASR
 from src.engines.live_call_session import LiveCallSession
 
 app = FastAPI(title="RT-MASR Live Voice-Call Simulation")

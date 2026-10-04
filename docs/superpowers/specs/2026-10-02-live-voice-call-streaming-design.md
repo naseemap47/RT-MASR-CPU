@@ -56,7 +56,7 @@ This specification details the architecture and implementation plan for a workin
     - Text JSON (`type: "metrics"`): Audio duration, processing latency, real-time factor (RTF).
     - Text JSON (`type: "call_ended"`): Final transcription, total call duration, total processing time, and overall RTF.
 
-### 2.2 Streaming ASR Integration (`src/engines/qwen3_engine.py` & Session Engine)
+### 2.2 Streaming ASR Integration (`src/engines/qwen3_onnx_engine.py` & Session Engine)
 - The ONNX engine loads Qwen3-ASR INT8 ONNX models (`encoder_conv.onnx`, `encoder_transformer.onnx`, `decoder_init.int8.onnx`, `decoder_step.int8.onnx`).
 - As binary audio frames arrive, they are converted to float32 NumPy arrays normalized to `[-1.0, 1.0]`.
 - The session accumulates incoming frames into a rolling stream buffer.
@@ -91,7 +91,7 @@ This specification details the architecture and implementation plan for a workin
 ---
 
 ## 4. Dependencies & Files
-- Existing: `src/engines/qwen3_engine.py`, `utils/audio_utils.py`, `config/`
+- Existing: `src/engines/qwen3_onnx_engine.py`, `utils/audio_utils.py`, `config/`
 - To Create/Update:
   - `main.py` (FastAPI app and WebSocket server)
   - `src/engines/live_call_session.py` (Call leg session manager)

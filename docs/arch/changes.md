@@ -302,7 +302,7 @@ never grows beyond one encoder-context window regardless of speech continuity.
 └─────────────────────────┬───────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────┐
-│  OnnxAsrPipeline  (src/engines/qwen3_engine.py)         │
+│  OnnxAsrPipeline  (src/engines/qwen3_onnx_engine.py)         │
 │  • transcribe_stream yields (delta, timing|None)        │
 │  • Per-stage timing: mel_s, encoder_s, prefill_s,       │
 │    decode_s, tokens_generated, rtf                      │
@@ -315,7 +315,7 @@ never grows beyond one encoder-context window regardless of speech continuity.
 
 | File | Change |
 |---|---|
-| `src/engines/qwen3_engine.py` | `transcribe_stream` now yields `(str, dict\|None)` tuples with per-stage timing |
+| `src/engines/qwen3_onnx_engine.py` | `transcribe_stream` now yields `(str, dict\|None)` tuples with per-stage timing |
 | `src/engines/live_call_session.py` | T0–T3 anchors, `get_metrics()`, `has_speech()`, `find_vad_boundary()`, `pop_utterance()`, `append_committed()`, `committed_text` |
 | `main.py` | `asyncio` import, `_run_inference()` helper, energy gate, VAD dual-path inference, `GET /api/health` |
 | `static/index.html` | 8-metric grid, waterfall bar, state pill, tooltips |

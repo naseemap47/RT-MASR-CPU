@@ -27,7 +27,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from src.engines.qwen3_engine import ONNXQwen3ASR
+from src.engines.qwen3_onnx_engine import ONNXQwen3ASR
 from src.engines.live_call_session import LiveCallSession
 
 _engine: Optional[ONNXQwen3ASR] = None

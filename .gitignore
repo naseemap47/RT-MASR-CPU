@@ -218,4 +218,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 # pdf
-*.pdf
+*.pdfbenchmark/results/*.json
+benchmark/results/*.md

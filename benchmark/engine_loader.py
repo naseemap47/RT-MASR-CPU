@@ -1,0 +1,86 @@
+# benchmark/engine_loader.py
+"""
+Engine loader: resolves a bench_config entry to an ASR engine instance.
+
+Supports two backends:
+  - "onnx"         → ONNXQwen3ASR (from src/engines/qwen3_onnx_engine.py)
+  - "transformers" → Qwen3ASR     (from src/engines/qwen3_engine.py)
+
+Each entry in bench_config.yaml["configs"] looks like:
+    id: "onnx_int8"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx.yaml"
+"""
+from __future__ import annotations
+
+import sys
+import os
+from typing import Any, Callable
+
+# Ensure project root is on the path so src.engines is importable
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+# Also add src/ so 'from engines.xxx import ...' works
+_SRC_ROOT = os.path.join(_PROJECT_ROOT, "src")
+if _SRC_ROOT not in sys.path:
+    sys.path.insert(0, _SRC_ROOT)
+
+
+def load_engine(config_entry: dict) -> Any:
+    """
+    Instantiate an ASR engine from a bench_config entry.
+
+    Args:
+        config_entry: Dict with keys: id, backend, model_config.
+
+    Returns:
+        A live engine instance with a .transcribe(audio_path) -> dict method.
+
+    Raises:
+        ValueError: If backend is not 'onnx' or 'transformers'.
+        FileNotFoundError: If model_config path does not exist.
+    """
+    import yaml
+
+    backend = config_entry.get("backend", "")
+    model_config_path = config_entry.get("model_config", "")
+
+    if not os.path.exists(model_config_path):
+        raise FileNotFoundError(
+            f"Model config not found: {model_config_path}"
+        )
+
+    with open(model_config_path, "r") as f:
+        model_cfg = yaml.safe_load(f)
+
+    if backend == "onnx":
+        from engines.qwen3_onnx_engine import ONNXQwen3ASR
+        return ONNXQwen3ASR.from_config(model_cfg)
+
+    elif backend == "transformers":
+        from engines.qwen3_engine import Qwen3ASR
+        return Qwen3ASR.from_config(model_cfg)
+
+    else:
+        raise ValueError(
+            f"Unknown backend '{backend}'. "
+            f"Supported: 'onnx', 'transformers'."
+        )
+
+
+def engine_factory(config_entry: dict) -> Callable[[], Any]:
+    """
+    Return a zero-argument factory function that creates a fresh engine.
+
+    Used by ConcurrencyRunner, which needs to instantiate engines on demand.
+
+    Args:
+        config_entry: Same dict as load_engine().
+
+    Returns:
+        Callable[[], engine] — calling it returns a new engine instance.
+    """
+    def _factory() -> Any:
+        return load_engine(config_entry)
+    return _factory

@@ -1,0 +1,50 @@
+# benchmark/configs/bench_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Benchmark run configuration for Qwen3-ASR CPU evaluation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Configurations to benchmark. Each entry maps to an engine class + config.
+configs:
+  - id: "onnx_int8"
+    display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx.yaml"
+
+  - id: "transformers_bf16_0.6b"
+    display_name: "Qwen3-ASR-0.6B BF16 (Transformers / CPU)"
+    backend: "transformers"
+    model_config: "config/models/qwen3_0.6b.yaml"
+
+  - id: "transformers_bf16_1.7b"
+    display_name: "Qwen3-ASR-1.7B BF16 (Transformers / CPU)"
+    backend: "transformers"
+    model_config: "config/models/qwen3_1.7b.yaml"
+
+# Number of inference runs per audio file (first `warmup_runs` are discarded).
+runs: 3
+warmup_runs: 1
+
+# Concurrency levels to test (number of simultaneous call legs).
+concurrency_legs: [1, 2, 4]
+
+# Number of rounds per concurrency level (each round fires n_legs calls).
+concurrency_rounds: 2
+
+# Audio files for latency and accuracy testing.
+audio:
+  en:
+    - "test_audio/en/librispeech_0_1089_0.wav"
+    - "test_audio/en/librispeech_1_1089_1.wav"
+    - "test_audio/en/librispeech_2_1089_2.wav"
+  zh:
+    - "test_audio/cn/OSR_cn_000_0072_8k.wav"
+    - "test_audio/cn/OSR_cn_000_0073_8k.wav"
+  id:
+    - "test_audio/id/ind_001.wav"
+    - "test_audio/id/ind_002.wav"
+
+# Output directory for results.
+output_dir: "benchmark/results"
+
+# References file for accuracy testing.
+references_file: "benchmark/data/references.yaml"

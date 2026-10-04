@@ -1,0 +1,44 @@
+# benchmark/data/references.yaml
+# Reference transcripts for WER/CER evaluation.
+# lang: "en" | "id" | "zh"
+# metric: "wer" (EN/ID) | "cer" (ZH)
+#
+# English references from LibriSpeech (speaker 1089, chapter 0).
+# Indonesian references from OSR Indonesian corpus.
+# Mandarin references from OSR Chinese corpus (OSR_cn).
+
+references:
+  - audio: "test_audio/en/librispeech_0_1089_0.wav"
+    lang: "en"
+    metric: "wer"
+    text: "HE HOPED THERE WOULD BE STEW FOR DINNER TURNIPS AND CARROTS AND BRUISED POTATOES AND FAT MUTTON PIECES TO BE LADLED OUT IN THICK PEPPERED FLOUR FATTENED SAUCE"
+
+  - audio: "test_audio/en/librispeech_1_1089_1.wav"
+    lang: "en"
+    metric: "wer"
+    text: "STUFF IT INTO YOU HIS BELLY COUNSELLED HIM"
+
+  - audio: "test_audio/en/librispeech_2_1089_2.wav"
+    lang: "en"
+    metric: "wer"
+    text: "AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS"
+
+  - audio: "test_audio/cn/OSR_cn_000_0072_8k.wav"
+    lang: "zh"
+    metric: "cer"
+    text: "橡皮擦了写错的字"
+
+  - audio: "test_audio/cn/OSR_cn_000_0073_8k.wav"
+    lang: "zh"
+    metric: "cer"
+    text: "她把花插在花瓶里"
+
+  - audio: "test_audio/id/ind_001.wav"
+    lang: "id"
+    metric: "wer"
+    text: "saya ingin pesan makanan"
+
+  - audio: "test_audio/id/ind_002.wav"
+    lang: "id"
+    metric: "wer"
+    text: "tolong panggil dokter sekarang"

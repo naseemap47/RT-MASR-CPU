@@ -96,6 +96,13 @@
             </button>
           </div>
 
+          <!-- Playback sound: the audio is always streamed to the ASR; this only controls what you hear -->
+          <button id="mute-btn" class="btn btn-ghost btn-mute is-muted" type="button"
+                  aria-pressed="true" title="Toggle playback sound (does not affect transcription)">
+            <span class="mute-icon" id="mute-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6v4h3l4 3V3L5 6H2z"/><path d="M11 5.5l4 5M15 5.5l-4 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></span>
+            <span id="mute-label">Sound: Off (muted)</span>
+          </button>
+
           <!-- Process telemetry sidebar -->
           <div class="proc-telemetry" id="proc-telemetry">
             <div class="proc-row"><span class="proc-label">Process RSS</span><span class="proc-val" id="proc-rss">—</span></div>

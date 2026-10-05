@@ -26,6 +26,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const startBtn               = document.getElementById("start-btn");
   const hangupBtn              = document.getElementById("hangup-btn");
   const resetBtn               = document.getElementById("reset-btn");
+  const muteBtn                = document.getElementById("mute-btn");
+  const muteIcon               = document.getElementById("mute-icon");
+  const muteLabel              = document.getElementById("mute-label");
   const languageSelect         = document.getElementById("language-select");
   const modelStatusText        = document.getElementById("model-status-text");
   const transcriptBox          = document.getElementById("transcript-box");
@@ -71,6 +74,8 @@ document.addEventListener("DOMContentLoaded", () => {
   let websocket        = null;
   let audioContext     = null;
   let audioSourceNode  = null;
+  let gainNode         = null;
+  let isMuted          = true;   // playback is muted by default; ASR still receives the audio
   let timerInterval    = null;
   let healthInterval   = null;
   let callStartTime    = 0;
@@ -235,6 +240,20 @@ document.addEventListener("DOMContentLoaded", () => {
   startBtn.onclick = startCallLeg;
   hangupBtn.onclick = endCallLeg;
   resetBtn.onclick = resetUI;
+
+  /* ── Playback mute (default: muted) ───────────────────── */
+  const ICON_MUTED = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6v4h3l4 3V3L5 6H2z"/><path d="M11 5.5l4 5M15 5.5l-4 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>`;
+  const ICON_ON    = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6v4h3l4 3V3L5 6H2z"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.7a6 6 0 0 1 0 8.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>`;
+
+  function applyMute() {
+    if (gainNode) gainNode.gain.value = isMuted ? 0 : 1;
+    muteBtn.classList.toggle("is-muted", isMuted);
+    muteBtn.setAttribute("aria-pressed", String(isMuted));
+    muteLabel.textContent = isMuted ? "Sound: Off (muted)" : "Sound: On";
+    muteIcon.innerHTML = isMuted ? ICON_MUTED : ICON_ON;   // static markup, no user data
+  }
+  muteBtn.onclick = () => { isMuted = !isMuted; applyMute(); };
+  applyMute();
 
   /* ── Metric helpers ───────────────────────────────────── */
   function setMetric(el, text) {
@@ -404,7 +423,10 @@ document.addEventListener("DOMContentLoaded", () => {
       if (audioContext.state === "suspended") audioContext.resume();
       audioSourceNode = audioContext.createBufferSource();
       audioSourceNode.buffer = audioBuffer;
-      audioSourceNode.connect(audioContext.destination);
+      gainNode = audioContext.createGain();
+      gainNode.gain.value = isMuted ? 0 : 1;
+      audioSourceNode.connect(gainNode);
+      gainNode.connect(audioContext.destination);
       audioSourceNode.start(0);
     }
 
@@ -444,6 +466,7 @@ document.addEventListener("DOMContentLoaded", () => {
       audioSourceNode.disconnect();
       audioSourceNode = null;
     }
+    if (gainNode) { try { gainNode.disconnect(); } catch (_) {} gainNode = null; }
     if (websocket) { try { websocket.close(); } catch (_) {} websocket = null; }
     if (audioContext) { audioContext.close(); audioContext = null; }
     startBtn.disabled  = false;

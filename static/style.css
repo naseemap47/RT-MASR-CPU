@@ -248,6 +248,10 @@ h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 
 .btn-danger:hover:not(:disabled)   { box-shadow: 0 0 16px var(--danger-glow); transform: translateY(-1px); }
 .btn-ghost    { background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid var(--border); }
 .btn-ghost:hover:not(:disabled)    { background: rgba(255,255,255,0.09); color: var(--text); }
+.btn-mute { width: 100%; margin-bottom: 16px; flex: none; }
+.btn-mute.is-muted { color: var(--text-dim); }
+.btn-mute:not(.is-muted) { color: #6ee7b7; border-color: rgba(110,231,183,0.4); }
+.btn-mute .mute-icon { display: inline-flex; }
 .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
 
 /* ── Process telemetry mini-panel ──────────────────── */

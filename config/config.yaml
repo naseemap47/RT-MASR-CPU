@@ -2,10 +2,12 @@
 # config/config.yaml  —  RT-MASR server top-level configuration
 #
 # Model variants and their per-model settings live in config/models/:
-#   config/models/models.yaml        ← model registry (all three variants)
-#   config/models/qwen3_onnx.yaml   ← ONNX backend    (ONNXQwen3ASR)
-#   config/models/qwen3_0.6b.yaml   ← Transformers 0.6B (Qwen3ASR)
-#   config/models/qwen3_1.7b.yaml   ← Transformers 1.7B (Qwen3ASR)
+#   config/models/models.yaml             ← model registry (all variants)
+#   config/models/qwen3_onnx.yaml         ← ONNX backend        (ONNXQwen3ASR)
+#   config/models/qwen3_0.6b.yaml         ← Transformers 0.6B   (Qwen3ASR)
+#   config/models/qwen3_1.7b.yaml         ← Transformers 1.7B   (Qwen3ASR)
+#   config/models/whisper_int8_*.yaml     ← Whisper ONNX INT8   (tiny/base/small/medium)
+#   config/models/whisper_fp16.yaml, whisper_fp32.yaml   ← Whisper ONNX, other precisions
 # ──────────────────────────────────────────────────────────────────────────────
 
 server:
@@ -18,7 +20,17 @@ server:
 #   "qwen3_onnx"   — ONNX Runtime, INT8 decoder, fastest on CPU, no PyTorch
 #   "qwen3_0.6b"   — Transformers 0.6B, balanced speed/accuracy, needs PyTorch
 #   "qwen3_1.7b"   — Transformers 1.7B, highest accuracy, slowest on CPU
-default_model: "qwen3_1.7b"
+#
+#   "whisper_int8_tiny"   — Whisper ONNX INT8, real-time on CPU, multilingual
+#   "whisper_int8_base"   — Whisper base, more accurate than tiny, slower
+#   "whisper_int8_small"  — Whisper small,  slower than real time on CPU
+#   "whisper_int8_medium" — Whisper medium, much slower than real time
+#   "whisper_fp16" / "whisper_fp32" — Whisper at higher precision (slower)
+#
+# Qwen models stream per speech utterance (VAD); Whisper models stream with a
+# sliding window (see the `streaming:` block in config/models/whisper_*.yaml).
+# The RT_MASR_MODEL environment variable overrides this value for one run.
+default_model: "whisper_int8_tiny"
 
 # Registry file that lists all available model variants.
 model_registry: "config/models/models.yaml"

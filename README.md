@@ -1,13 +1,17 @@
 # RT-MASR-CPU
 
 Real-time multilingual speech recognition on **CPU only**: a proof of concept
-that simulates a live voice-call leg and streams it through Qwen3-ASR, plus a
-benchmark harness that compares Qwen3-ASR runtimes against Whisper.
+that simulates a live voice-call leg and streams it through **Qwen3-ASR or
+Whisper** (selectable), plus a benchmark harness that compares both families.
 
 - **Languages:** English, Mandarin Chinese, Bahasa Indonesia (auto-detect or forced).
 - **Live demo:** a browser UI loads a WAV file, streams 16 kHz PCM over a WebSocket
   in 0.5 s chunks at real-time pace, and shows the evolving transcript with
-  latency, RTF, stage-timing and process telemetry.
+  latency, RTF, stage-timing and process telemetry. Playback sound is **muted by
+  default**; use the *Sound* toggle to listen along (transcription is unaffected).
+- **Streaming modes:** Qwen3-ASR streams per speech utterance (energy gate + VAD);
+  Whisper, which is an offline model, streams with a **sliding window** and
+  LocalAgreement-2 (confirmed text vs. dimmed tentative text).
 - **Engines:** Qwen3-ASR-0.6B on ONNX Runtime (INT8 decoder, no PyTorch),
   Qwen3-ASR-0.6B / 1.7B on Transformers (BF16), and Whisper tiny→medium on ONNX
   Runtime (INT8 / FP16 / FP32).
@@ -46,6 +50,7 @@ flowchart LR
     W --> S --> X
     X --> E1
     X --> E2
+    X --> E3
     W -- "chunk_ack · transcript_delta · call_ended" --> T
     CFG --> Server
     CFG --> BM
@@ -68,12 +73,17 @@ sequenceDiagram
         B->>S: 8000 Int16 samples (0.5 s)
         S-->>B: chunk_ack
         opt every 2nd chunk, if speech energy present
+            Note over S,E: Qwen models (VAD utterances)
             alt VAD finds a pause (or buffer ≥ 15 s)
                 S->>E: transcribe completed utterance once → commit as final
             else utterance still open
                 S->>E: re-transcribe open window (interim)
             end
-            S-->>B: transcript_delta {full_text, metrics}
+            S-->>B: transcript_delta {full_text, committed_text, tentative_text, metrics}
+        end
+        opt Whisper models: every 1 s of new audio (sliding window)
+            S->>E: re-transcribe the window, commit the prefix two passes agree on
+            S-->>B: transcript_delta {committed_text, tentative_text, metrics}
         end
     end
     B->>S: end_call
@@ -99,6 +109,7 @@ src/
     qwen3_onnx_engine.py    Qwen3-ASR ONNX Runtime engine
     qwen3_engine.py         Qwen3-ASR Transformers engine
     whisper_engine.py       Whisper ONNX Runtime engine
+    whisper_streaming.py    Sliding-window + LocalAgreement streamer for Whisper
   utils/
     audio_utils.py          Audio loading, mel spectrogram, silence splitting
     download_utils.py       Model downloader (CLI)
@@ -240,9 +251,9 @@ The name is resolved through `config/models/models.yaml` to a per-model YAML
 (`config/models/<name>.yaml`) that holds engine settings such as `num_threads`
 (0 = all cores), `quantize`, `dtype`, default `language` and ORT session options.
 
-- The repo currently ships with `default_model: "qwen3_1.7b"`. In our benchmark
-  that model ran slower than real time on an 8-core CPU (RTF ≈ 1.0–1.5), so use
-  `qwen3_onnx` for a smooth live demo.
+- The repo currently ships with `default_model: "whisper_int8_tiny"`. Qwen3-1.7B
+  ran slower than real time on an 8-core CPU in our benchmark (RTF ≈ 1.0–1.5); use
+  `qwen3_onnx` or `whisper_int8_tiny` for a smooth live demo.
 - `whisper_*` entries are served with **sliding-window streaming**: the window
   is re-transcribed every `hop_s`, text confirmed by two consecutive passes
   (LocalAgreement-2) is shown as final and the rest as dimmed tentative text. Tune
@@ -265,8 +276,10 @@ Open <http://localhost:8000>, then:
 
 1. Pick a sample from the list (served from `test_audio/`) or load a local WAV.
 2. Choose a language or leave **Auto-Detect**.
-3. Press **Start Call**. Audio plays locally and is streamed to the server at
-   real-time pace; the transcript and metric cards update as results arrive.
+3. Press **Start Call**. The audio is streamed to the server at real-time pace;
+   the transcript and metric cards update as results arrive. Playback is muted
+   by default; click **Sound** to hear it (the setting persists across calls
+   until the page reloads and never affects what is sent to the ASR).
 4. **Hang Up** ends the call early; **Reset** clears the UI.
 
 The model loads at startup (a few seconds for ONNX). `GET /api/health` reports

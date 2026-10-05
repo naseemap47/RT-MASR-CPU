@@ -249,7 +249,7 @@ All timestamps are server-side wall-clock (`time.time()`).
 | `ttft_ms` | T3 − T2 | First inference dispatch → first text available to the server |
 | `infer_latency_ms` | Ty − Tx | Wall-clock of the most recent pass |
 | `rtf` | `infer_latency_ms` / duration of `audio_buffer` at metric time | Real-time factor of that pass |
-| `mel_ms`, `encoder_ms`, `prefill_ms`, `decode_ms` | From the engine's timing sentinel | Per-stage breakdown. ONNX Qwen and Whisper report real values for all four (Whisper `prefill` = decoder prompt/language-id pass at KV offset 0; `decode` = later per-token steps) |
+| `mel_ms`, `encoder_ms`, `prefill_ms`, `decode_ms` | From the engine's timing sentinel | Per-stage breakdown. ONNX Qwen, Transformers Qwen (forward hooks) and Whisper report measured values for all four (Whisper `prefill` = decoder prompt/language-id pass at KV offset 0; `decode` = later per-token steps) |
 | `throughput_tps` | `tokens_generated / decode_s` | Decoder tokens per second |
 | `audio_throughput_bps` | `total_bytes / (now − T0)` | Average PCM ingress rate |
 | `rss_delta_mb` | `ru_maxrss(now) − ru_maxrss(T0)` | Peak-RSS growth during the call |

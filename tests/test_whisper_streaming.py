@@ -343,3 +343,22 @@ def test_whisper_timing_reports_nonzero_prefill_and_consistent_stages():
     # the streaming generator reports the same keys
     final = [tm for _, tm in eng.transcribe_stream(wav, language="en") if tm][-1]
     assert final["prefill_s"] > 0
+
+
+# ── Qwen Transformers backend: stage timing is measured, not estimated ───────
+QWEN06 = "models/qwen3-asr-0.6b"
+
+
+@pytest.mark.skipif(not os.path.isdir(QWEN06), reason="qwen3-asr-0.6b not downloaded")
+def test_qwen_transformers_stage_timing_is_measured():
+    import soundfile as sf
+    from src.engines.qwen3_engine import Qwen3ASR
+
+    eng = Qwen3ASR(model_path=QWEN06)
+    wav, _ = sf.read("test_audio/en/librispeech_2_1089_2.wav", dtype="float32")
+    t = [tm for _, tm in eng.transcribe_stream(wav) if tm][-1]
+    assert t["encoder_s"] > 0 and t["prefill_s"] > 0 and t["decode_s"] > 0
+    # not the old fixed 55/20/25 split
+    assert abs(t["encoder_s"] / t["total_s"] - 0.55) > 0.01
+    assert t["mel_s"] + t["encoder_s"] + t["prefill_s"] + t["decode_s"] <= t["total_s"] + 0.05
+    assert t["tokens_generated"] > 5

@@ -51,6 +51,7 @@ forward call.  This is slower than ONNX on CPU but architecturally correct.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Generator, Optional, Union
@@ -122,6 +123,97 @@ def _pad_chunk(wav: np.ndarray) -> np.ndarray:
     return wav
 
 
+# ── Per-stage timing via PyTorch hooks ───────────────────────────────────────
+
+class _StageTimer:
+    """
+    Measures real encoder / prefill / decode time inside ``qwen_asr``'s single
+    blocking ``transcribe()`` call.
+
+    ``Qwen3ASRModel.transcribe`` gives no per-stage hooks, but the HF model under it
+    does expose ``thinker.audio_tower`` (the audio encoder) and ``thinker`` itself
+    (called once per generated token). Forward pre/post hooks on those two modules
+    give exact wall-clock figures without touching the library:
+
+      * ``audio_tower`` forward                       -> encoder_s
+      * ``thinker`` forward with ``input_features``   -> the prefill pass; it *contains*
+        the encoder (audio features are computed inside it), so
+        prefill_s = that forward's duration - encoder_s
+      * ``thinker`` forward without ``input_features`` -> one decode step (one token)
+      * time before the first prefill forward starts  -> mel_s (feature extraction,
+        resampling, prompt tokenisation done by the processor)
+
+    State is thread-local, so concurrent calls on one shared model do not mix.
+    """
+
+    def __init__(self, hf_model) -> None:
+        self._tls = threading.local()
+        self.available = False
+        try:
+            thinker = hf_model.thinker
+            tower = thinker.audio_tower
+        except AttributeError:
+            return          # unknown model layout: caller falls back to estimates
+
+        tower.register_forward_pre_hook(self._enc_start)
+        tower.register_forward_hook(self._enc_end)
+        thinker.register_forward_pre_hook(self._fwd_start, with_kwargs=True)
+        thinker.register_forward_hook(self._fwd_end, with_kwargs=True)
+        self.available = True
+
+    # -- state ----------------------------------------------------------
+    def _st(self) -> dict:
+        st = getattr(self._tls, "st", None)
+        if st is None:
+            st = self._tls.st = self._blank()
+        return st
+
+    @staticmethod
+    def _blank() -> dict:
+        return {"t_begin": None, "t_first_prefill": None, "enc": 0.0, "prefill_fwd": 0.0,
+                "decode": 0.0, "n_fwd": 0, "t_enc": 0.0, "t_fwd": 0.0, "is_prefill": False}
+
+    def begin(self) -> None:
+        """Call right before ``model.transcribe``; resets this thread's counters."""
+        st = self._tls.st = self._blank()
+        st["t_begin"] = time.perf_counter()
+
+    def result(self) -> dict:
+        """Stage seconds for the last call on this thread."""
+        st = self._st()
+        t_first = st["t_first_prefill"]
+        mel = (t_first - st["t_begin"]) if (t_first is not None and st["t_begin"] is not None) else 0.0
+        return {
+            "mel_s":      max(0.0, mel),
+            "encoder_s":  st["enc"],
+            "prefill_s":  max(0.0, st["prefill_fwd"] - st["enc"]),
+            "decode_s":   st["decode"],
+            "n_forwards": st["n_fwd"],       # one per generated token (prefill yields the first)
+        }
+
+    # -- hooks ----------------------------------------------------------
+    def _enc_start(self, module, args):
+        self._st()["t_enc"] = time.perf_counter()
+
+    def _enc_end(self, module, args, output):
+        st = self._st()
+        st["enc"] += time.perf_counter() - st["t_enc"]
+
+    def _fwd_start(self, module, args, kwargs):
+        st = self._st()
+        now = time.perf_counter()
+        st["t_fwd"] = now
+        st["is_prefill"] = kwargs.get("input_features") is not None
+        if st["is_prefill"] and st["t_first_prefill"] is None:
+            st["t_first_prefill"] = now
+
+    def _fwd_end(self, module, args, kwargs, output):
+        st = self._st()
+        dt = time.perf_counter() - st["t_fwd"]
+        st["n_fwd"] += 1
+        st["prefill_fwd" if st["is_prefill"] else "decode"] += dt
+
+
 # ── Inner pipeline (wraps Qwen3ASRModel) ─────────────────────────────────────
 
 class _Qwen3Pipeline:
@@ -148,7 +240,9 @@ class _Qwen3Pipeline:
             max_new_tokens=max_new_tokens,
         )
         self._default_max_new_tokens = max_new_tokens
-        print(f"Model loaded in {time.time() - t0:.1f}s")
+        self._timer = _StageTimer(getattr(self.model, "model", None))
+        print(f"Model loaded in {time.time() - t0:.1f}s"
+              f" (stage timing: {'measured via hooks' if self._timer.available else 'estimated'})")
 
     # ------------------------------------------------------------------
     # Single-chunk transcription
@@ -171,14 +265,15 @@ class _Qwen3Pipeline:
                         "prefill_s", "decode_s" }
         }
 
-        Stage timing estimation (Transformers backend is a single blocking call):
-          mel_s      — librosa mel spectrogram time (timed separately before the call)
-          encoder_s  — estimated: 70 % of (total - mel) for audio shorter than 10 s,
-                       else 80 %. Accounts for the dominant Whisper-encoder cost.
-          prefill_s  — 0.0  (absorbed into encoder_s; indistinguishable in this backend)
-          decode_s   — remaining time after mel + encoder estimate
+        Stage timing (``qwen_asr`` is one blocking call, so it is measured with
+        forward hooks, see :class:`_StageTimer`; same meaning as the ONNX engine):
+          mel_s      — processor time before the model runs (features, tokenisation)
+          encoder_s  — audio encoder forward
+          prefill_s  — prompt pass over audio+text tokens, excluding the encoder
+          decode_s   — per-token decoder steps after the prefill
+        If the model layout is unknown the split falls back to fixed proportions
+        and ``timing["timing_estimated"]`` is True.
         """
-        import librosa as _librosa
 
         if max_new_tokens is None:
             max_new_tokens = self._default_max_new_tokens
@@ -187,33 +282,30 @@ class _Qwen3Pipeline:
         wav = _pad_chunk(wav)
         audio_input = (wav, SAMPLE_RATE)
 
-        # ── Time mel spectrogram computation separately ────────────────────
-        t_mel_start = time.time()
-        _mel = _librosa.feature.melspectrogram(y=wav, sr=SAMPLE_RATE, n_mels=128)
-        t_mel = time.time() - t_mel_start
-
-        # ── Blocking inference call ────────────────────────────────────────
+        # ── Blocking inference call (stages measured by hooks) ─────────────
+        self._timer.begin()
         t0 = time.time()
         results = self.model.transcribe(audio=audio_input, language=language)
         total_s = time.time() - t0
+        stages = self._timer.result() if self._timer.available else None
 
         result = results[0]
         text = result.text or ""
         lang = result.language or (language or "")
 
-        # Approximate token count from word count (qwen_asr has no token hook).
-        tokens_approx = max(1, len(text.split()))
-
-        # ── Estimate mel / encoder / prefill / decode split ────────────────
-        # qwen_asr is a single blocking call with no per-stage hooks.
-        # We use a fixed proportional split that mirrors what the ONNX backend
-        # reports for typical short-utterance audio:
-        #   encoder : 55 % — Whisper-style conv + transformer over audio frames
-        #   prefill : 20 % — KV-cache initialisation over audio+prompt tokens
-        #   decode  : 25 % — greedy token generation (scales with output length)
-        t_encoder = total_s * 0.55
-        t_prefill = total_s * 0.20
-        t_decode  = total_s * 0.25
+        if stages is not None and stages["n_forwards"] > 0:
+            # One thinker forward per generated token (the last token, EOS, is sampled
+            # from the final forward), so this is a true token count.
+            tokens = stages["n_forwards"]
+            t_mel, t_encoder = stages["mel_s"], stages["encoder_s"]
+            t_prefill, t_decode = stages["prefill_s"], stages["decode_s"]
+            estimated = False
+        else:
+            # Hooks unavailable: fixed proportional split, word-count token estimate.
+            tokens = max(1, len(text.split()))
+            t_mel = 0.0
+            t_encoder, t_prefill, t_decode = total_s * 0.55, total_s * 0.20, total_s * 0.25
+            estimated = True
 
         return {
             "text": text,
@@ -223,7 +315,8 @@ class _Qwen3Pipeline:
                 "total_s":          total_s,
                 "audio_duration_s": audio_duration_s,
                 "rtf":              total_s / audio_duration_s if audio_duration_s > 0 else 0.0,
-                "tokens_generated": tokens_approx,
+                "tokens_generated": tokens,
+                "timing_estimated": estimated,
                 "mel_s":            t_mel,
                 "encoder_s":        t_encoder,
                 "prefill_s":        t_prefill,

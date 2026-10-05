@@ -17,6 +17,7 @@ dependencies = [
     "websockets>=17.1",
     "psutil>=6.0.0",
     "qwen-asr>=0.0.6",
+    "onnx>=1.23.1",
 ]
 
 [build-system]

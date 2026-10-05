@@ -1,44 +1,56 @@
 # benchmark/data/references.yaml
 # Reference transcripts for WER/CER evaluation.
-# lang: "en" | "id" | "zh"
-# metric: "wer" (EN/ID) | "cer" (ZH)
+# lang:     "en" | "id" | "zh"
+# metric:   "wer" (EN/ID) | "cer" (ZH)
+# verified: true  = transcript is from the corpus / checked by a human
+#           false = DRAFT. Taken from the agreeing output of Qwen3-ASR 0.6B and 1.7B.
+#                   Scores against a draft measure agreement with those models, NOT
+#                   true accuracy (and are biased in favour of Qwen). Proof-read the
+#                   audio, correct the text, then set verified: true.
 #
-# English references from LibriSpeech (speaker 1089, chapter 0).
-# Indonesian references from OSR Indonesian corpus.
-# Mandarin references from OSR Chinese corpus (OSR_cn).
+# English: LibriSpeech speaker 1089 (corpus transcripts).
+# Mandarin: OSR Chinese corpus (OSR_cn_000_*); each 8 kHz file holds several sentences.
+# Indonesian: ind_*.wav (no corpus transcript available).
 
 references:
   - audio: "test_audio/en/librispeech_0_1089_0.wav"
     lang: "en"
     metric: "wer"
+    verified: true
     text: "HE HOPED THERE WOULD BE STEW FOR DINNER TURNIPS AND CARROTS AND BRUISED POTATOES AND FAT MUTTON PIECES TO BE LADLED OUT IN THICK PEPPERED FLOUR FATTENED SAUCE"
 
   - audio: "test_audio/en/librispeech_1_1089_1.wav"
     lang: "en"
     metric: "wer"
+    verified: true
     text: "STUFF IT INTO YOU HIS BELLY COUNSELLED HIM"
 
   - audio: "test_audio/en/librispeech_2_1089_2.wav"
     lang: "en"
     metric: "wer"
+    verified: true
     text: "AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS"
 
   - audio: "test_audio/cn/OSR_cn_000_0072_8k.wav"
     lang: "zh"
     metric: "cer"
-    text: "橡皮擦了写错的字"
+    verified: false
+    text: "院子门口不远处就是一个地铁站。这是一个美丽而神奇的景象。树上长满了又大又甜的桃子。海豚和金鱼的表演是很好看的节目。邮局门前的人行道上有一个蓝色的邮箱。"
 
   - audio: "test_audio/cn/OSR_cn_000_0073_8k.wav"
     lang: "zh"
     metric: "cer"
-    text: "她把花插在花瓶里"
+    verified: false
+    text: "他用画笔为自己画了一幅美丽的人生蓝图。一只白鹭站在河畔的浅水里。宿舍楼旁边的十字路口有一个公共汽车站。夏日的夕阳很美丽，尤其是夏日大平原的夕阳。那个年代已经一去不复返了。"
 
   - audio: "test_audio/id/ind_001.wav"
     lang: "id"
     metric: "wer"
-    text: "saya ingin pesan makanan"
+    verified: false
+    text: "Pelajaran sembilan, beli kipas angin."
 
   - audio: "test_audio/id/ind_002.wav"
     lang: "id"
     metric: "wer"
-    text: "tolong panggil dokter sekarang"
+    verified: false
+    text: "Joel sedih. Dia merasa capai, tapi bukan karena belajar terlalu keras."

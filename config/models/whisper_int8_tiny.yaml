@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/whisper_int8_tiny.yaml
+#
+# Whisper tiny — ONNX INT8 backend (fastest on CPU, smallest files)
+#   Engine  : WhisperOnnxEngine  (src/engines/whisper_engine.py)
+#   Source  : PINTO model-zoo, Wasabi S3 (INT8 dynamic-range quantised)
+#   Local   : models/whisper_int8   (shared by all INT8 sizes)
+#   Files   : tiny_encoder_11_int8.onnx, tiny_decoder_11_int8.onnx
+#   Download: DownloadModels().download_whisper(target_dir="models/whisper_int8", precision="int8")
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "whisper_int8_tiny"
+display_name: "Whisper tiny INT8 (ONNX / CPU)"
+backend: "whisper"               # → loads src/engines/whisper_engine.py :: WhisperOnnxEngine
+
+download:
+  method: "whisper"              # uses DownloadModels.download_whisper()
+  target_dir: "models/whisper_int8"
+  precision: "int8"
+
+engine:
+  model_name: "tiny"
+  model_dir: "models/whisper_int8"
+  precision: "int8"
+  num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
+  language: null                 # null = auto-detect; "en" | "fr" | "zh" | etc.
+  graph_opt: "all"               # none | basic | extended | all
+
+inference:
+  beam_size: 5
+  temperature: 0.0
+
+# Live streaming (main.py → src/engines/whisper_streaming.py): sliding window +
+# LocalAgreement-2. The benchmark ignores this block.
+streaming:
+  hop_s: 1.0               # re-transcribe the window every N seconds of new audio
+  min_window_s: 1.0        # don't transcribe less audio than this
+  max_window_s: 12.0       # slide the window forward once it exceeds this
+  hard_max_window_s: 20.0  # force-commit + cut here if nothing was confirmed (Whisper max 30)
+  silence_flush_s: 0.8     # trailing silence that finalises the utterance
+  preroll_s: 0.5           # audio kept while idle (no speech pending)
+  beam_size: 1             # 1 = greedy (fast); raise for accuracy at the cost of latency
+  fallback: false          # temperature-fallback retries; slow, keep off for live use
+  lock_language: true      # reuse the first detected language for the rest of the call
+
+audio:
+  sample_rate: 16000
+  chunk_length_sec: 30
+
+ort_session:
+  graph_optimization_level: "all"
+  log_severity_level: 3
+  providers:
+    - "CPUExecutionProvider"

@@ -2,6 +2,22 @@
 
 > This document records every structural change made to the system, why it was
 > made, and how it altered the data-flow. Changes are in chronological order.
+>
+> For the current state of the system see [`architecture.md`](architecture.md).
+> Code snippets below show the change at the time it was made; later sections
+> may have superseded them.
+
+| # | Change | Date |
+|---|---|---|
+| 1 | Telemetry instrumentation | 2026-10-02 |
+| 2 | `transcribe_stream` timing sentinel | 2026-10-02 |
+| 3 | Async executor for inference | 2026-10-03 |
+| 4 | RMS energy gate | 2026-10-03 |
+| 5 | VAD sentence-boundary chunking | 2026-10-03 |
+| 6 | Hallucination investigation and fix | 2026-10-03 |
+| 7 | Config-driven model registry and multiple backends | 2026-10-04 |
+| 8 | Offline benchmark pipeline | 2026-10-04 |
+| 9 | Whisper ONNX engine (benchmark comparison) | 2026-10-05 |
 
 ---
 
@@ -151,7 +167,11 @@ async def _run_inference(engine, audio_buffer, language):
 ```
 
 `_collect` is dispatched to Python's default `ThreadPoolExecutor`. The event loop
-**awaits** the future, staying free to process incoming chunks in parallel.
+**awaits** the future and stays free to serve other connections and
+`/api/health`. Within the same call leg the handler does not call `receive()`
+until the await returns, so that call's frames queue in the server-side receive
+buffer during inference and are drained afterwards (the diagram below shows the
+event loop, not this handler).
 
 ```
 AFTER
@@ -275,7 +295,10 @@ never grows beyond one encoder-context window regardless of speech continuity.
 
 ---
 
-## Summary of architectural layers changed
+## Summary of architectural layers changed (sections 1–5)
+
+At this point the only engine was the Qwen3 ONNX pipeline; sections 7–9 add the
+config registry, the Transformers and Whisper engines, and the benchmark.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -457,3 +480,102 @@ models because hallucinations produce the same token density as real speech.
 The correct mitigation is upstream: ensure the model **never receives non-speech
 audio** in the first place, through calibrated energy gates and minimum committed
 chunk length.
+
+---
+
+## 7. Config-Driven Model Registry and Multiple Backends
+
+### Problem
+
+The engine class and model paths were hard-coded in `main.py`. Comparing model
+sizes or runtimes (an assignment requirement) meant editing code.
+
+### Changes
+
+- The ONNX engine was renamed `qwen3_engine.py` → `qwen3_onnx_engine.py`
+  (`ONNXQwen3ASR`), and a new `qwen3_engine.py` (`Qwen3ASR`) wraps the
+  `qwen-asr` Transformers package with the same `transcribe()` /
+  `transcribe_stream()` contract.
+- Configuration was split into three levels:
+
+```
+config/config.yaml                 server + default_model + model_registry path
+  └─ config/models/models.yaml     registry: name, config, backend, engine_class, model_dir
+       └─ config/models/<name>.yaml  download / engine / inference / audio / ort_session
+```
+
+- `src/core/config.py` resolves `default_model` through the registry
+  (`resolve_model_config()`), and each engine gained `from_config()` /
+  `from_config_path()`.
+- `main.py` `_build_engine()` dispatches on the per-model `backend` field
+  (`onnx` | `transformers`). `/api/health` reports the active model and backend.
+- `src/utils/download_utils.py` became config-driven: `download.method` selects
+  `onnx` (only the ONNX artefacts + tokenizer from the HF repo), `snapshot`
+  (full HF snapshot) or, later, `whisper` (PINTO tarball). It runs as a CLI with
+  `--model`, `--config` and `--force`.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `src/engines/qwen3_onnx_engine.py` | Renamed from `qwen3_engine.py`; `from_config()` |
+| `src/engines/qwen3_engine.py` | New Transformers backend (`Qwen3ASR`) |
+| `src/core/config.py` | New: registry + per-model config resolution, dtype helper |
+| `config/config.yaml`, `config/models/*.yaml` | New three-level config |
+| `src/utils/download_utils.py` | Config-driven downloader + CLI |
+| `main.py` | `_build_engine()` backend dispatch; health reports model/backend |
+
+---
+
+## 8. Offline Benchmark Pipeline
+
+### Problem
+
+The live UI shows per-call metrics but cannot produce repeatable, comparable
+numbers (percentiles, accuracy, concurrency scaling) across configurations.
+
+### Changes
+
+A standalone package `benchmark/` runs four stages per configuration — cold
+load, latency/RTF, accuracy (WER/CER) and concurrency — against the engines
+directly (no WebSocket), and writes a raw JSON plus a Markdown summary with a
+hardware fingerprint. Design and usage are documented in
+[`../benchmark/benchmarking.md`](../benchmark/benchmarking.md).
+
+Notable decisions:
+
+- The engine loaded for the cold-start measurement is reused by the other stages,
+  and memory is released between configs so the next load's RSS baseline is clean.
+- Every concurrency level uses the same fixed audio workload so levels are
+  comparable.
+- A failing config is recorded in `failures` instead of aborting the run.
+
+---
+
+## 9. Whisper ONNX Engine (Benchmark Comparison)
+
+### Problem
+
+The assignment asks for Qwen3-ASR to be compared against alternative CPU
+models/runtimes.
+
+### Changes
+
+- `src/engines/whisper_engine.py` (`WhisperOnnxEngine`) runs PINTO model-zoo
+  Whisper ONNX exports (`{size}_encoder_11_{precision}.onnx` /
+  `{size}_decoder_11_{precision}.onnx`) on ONNX Runtime.
+- Beam search, temperature fallback, language detection and segmenting are
+  reused from the vendored `src/whisper/` package (from `whisper-onnx-cpu`);
+  a `_WhisperModelProxy` routes its model calls to the ONNX sessions.
+- Registry entries: `whisper_int8_{tiny,base,small,medium}` (all sharing
+  `models/whisper_int8/`), `whisper_fp16`, `whisper_fp32`.
+- The downloader gained `method: whisper`; one tarball per precision contains
+  every model size.
+- `benchmark/engine_loader.py` and `bench_config.yaml` gained the `whisper`
+  backend and the four INT8 sizes.
+
+### Scope
+
+Whisper is wired into the benchmark only. `main.py` `_build_engine()` still
+accepts just `onnx` and `transformers`, so a `whisper_*` `default_model` is not
+servable by the live UI yet.

@@ -44,24 +44,32 @@ class SystemSampler:
         self._threads: list[int] = []
         self._result: Optional[dict] = None
 
-    def _sample_loop(self) -> None:
-        # Prime the CPU counter (first call always returns 0.0)
-        psutil.cpu_percent(interval=None)
-        self._proc.cpu_percent(interval=None)
+    def _sample_once(self) -> None:
+        try:
+            self._overall_cpu.append(psutil.cpu_percent(interval=None))
+            self._proc_cpu.append(self._proc.cpu_percent(interval=None))
+            mem = self._proc.memory_info()
+            self._rss_mb.append(mem.rss / (1024 * 1024))
+            self._threads.append(self._proc.num_threads())
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
-        while not self._stop_event.is_set():
-            try:
-                self._overall_cpu.append(psutil.cpu_percent(interval=None))
-                self._proc_cpu.append(self._proc.cpu_percent(interval=None))
-                mem = self._proc.memory_info()
-                self._rss_mb.append(mem.rss / (1024 * 1024))
-                self._threads.append(self._proc.num_threads())
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                break
-            time.sleep(self._interval_s)
+    def _sample_loop(self) -> None:
+        # Event.wait() returns True as soon as stop is requested, so the thread
+        # exits promptly, and each sample covers a full `interval_s` window
+        # (psutil CPU% is measured since the previous call).
+        while not self._stop_event.wait(self._interval_s):
+            self._sample_once()
 
     def __enter__(self) -> "SystemSampler":
         self._stop_event.clear()
+        self._overall_cpu, self._proc_cpu = [], []
+        self._rss_mb, self._threads = [], []
+        self._result = None
+        # Prime the CPU counters *before* the work starts: the first
+        # cpu_percent() call always returns a meaningless 0.0.
+        psutil.cpu_percent(interval=None)
+        self._proc.cpu_percent(interval=None)
         self._thread = threading.Thread(target=self._sample_loop, daemon=True)
         self._thread.start()
         return self
@@ -70,6 +78,10 @@ class SystemSampler:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        # Runs shorter than one interval would otherwise have no samples at all;
+        # this sample then covers the whole run.
+        if not self._rss_mb:
+            self._sample_once()
         self._result = self._build_result()
 
     def _build_result(self) -> dict:

@@ -1,6 +1,6 @@
 # benchmark/configs/bench_config.yaml
 # ─────────────────────────────────────────────────────────────────────────────
-# Benchmark run configuration for Qwen3-ASR CPU evaluation.
+# Benchmark run configuration for ASR CPU evaluation (Qwen3-ASR + Whisper).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Configurations to benchmark. Each entry maps to an engine class + config.
@@ -20,6 +20,27 @@ configs:
     backend: "transformers"
     model_config: "config/models/qwen3_1.7b.yaml"
 
+  # ── Whisper ONNX INT8 (all sizes share models/whisper_int8/) ───────────
+  - id: "whisper_int8_tiny"
+    display_name: "Whisper tiny INT8 (ONNX / CPU)"
+    backend: "whisper"
+    model_config: "config/models/whisper_int8_tiny.yaml"
+
+  - id: "whisper_int8_base"
+    display_name: "Whisper base INT8 (ONNX / CPU)"
+    backend: "whisper"
+    model_config: "config/models/whisper_int8_base.yaml"
+
+  - id: "whisper_int8_small"
+    display_name: "Whisper small INT8 (ONNX / CPU)"
+    backend: "whisper"
+    model_config: "config/models/whisper_int8_small.yaml"
+
+  - id: "whisper_int8_medium"      # slow on CPU (RTF > 2): use --runs 1 or skip
+    display_name: "Whisper medium INT8 (ONNX / CPU)"
+    backend: "whisper"
+    model_config: "config/models/whisper_int8_medium.yaml"
+
 # Number of inference runs per audio file (first `warmup_runs` are discarded).
 runs: 3
 warmup_runs: 1
@@ -27,8 +48,13 @@ warmup_runs: 1
 # Concurrency levels to test (number of simultaneous call legs).
 concurrency_legs: [1, 2, 4]
 
-# Number of rounds per concurrency level (each round fires n_legs calls).
+# Calls per worker at each concurrency level (total calls = legs * rounds).
 concurrency_rounds: 2
+
+# Fixed workload for the concurrency test: call i uses file i % len(list), so every
+# level and every config processes the same audio and results are comparable.
+concurrency_audio:
+  - "test_audio/en/librispeech_0_1089_0.wav"
 
 # Audio files for latency and accuracy testing.
 audio:

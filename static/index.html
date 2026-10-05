@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RT-MASR — Live Voice Call Leg Simulator</title>
-  <meta name="description" content="Real-time multilingual ASR streaming simulator powered by ONNX Qwen3-ASR-0.6B. Monitor live latency, RTF, throughput and memory telemetry.">
+  <meta name="description" content="Real-time multilingual ASR streaming simulator powered by ONNX Qwen3-ASR or Whisper. Monitor live latency, RTF, throughput and memory telemetry.">
   <link rel="stylesheet" href="/static/style.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 </head>
@@ -30,7 +30,7 @@
         </div>
         <div>
           <h1>RT-MASR <span class="title-sub">Live Call Simulator</span></h1>
-          <p class="title-desc">ONNX Qwen3-ASR-0.6B · CPU Inference</p>
+          <p class="title-desc" id="title-desc">Loading model… · CPU Inference</p>
         </div>
       </div>
       <div class="header-right">
@@ -57,7 +57,7 @@
           <select id="language-select" class="select-input">
             <option value="">Auto-Detect (Default)</option>
             <option value="en">English (en)</option>
-            <option value="zh">Mandarin Chinese (zh)</option>
+            <option value="zh">Chinese (zh)</option>
             <option value="id">Bahasa Indonesia (id)</option>
           </select>
 
@@ -96,11 +96,24 @@
             </button>
           </div>
 
+          <!-- Playback sound: the audio is always streamed to the ASR; this only controls what you hear -->
+          <button id="mute-btn" class="btn btn-ghost btn-mute is-muted" type="button"
+                  aria-pressed="true" title="Toggle playback sound (does not affect transcription)">
+            <span class="mute-icon" id="mute-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6v4h3l4 3V3L5 6H2z"/><path d="M11 5.5l4 5M15 5.5l-4 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></span>
+            <span id="mute-label">Sound: Off (muted)</span>
+          </button>
+
           <!-- Process telemetry sidebar -->
           <div class="proc-telemetry" id="proc-telemetry">
             <div class="proc-row"><span class="proc-label">Process RSS</span><span class="proc-val" id="proc-rss">—</span></div>
             <div class="proc-row"><span class="proc-label">Threads</span><span class="proc-val" id="proc-threads">—</span></div>
-            <div class="proc-row"><span class="proc-label">CPU%</span><span class="proc-val" id="proc-cpu">—</span></div>
+            <div class="proc-row">
+              <span class="proc-label">CPU%
+                <span class="info-dot" id="proc-cpu-info" tabindex="0" role="note" aria-label="About CPU percent"
+                      data-tooltip="Per-core scale: 100% = one CPU core fully busy. The model runs on several cores at once, so values above 100% are normal.">i</span>
+              </span>
+              <span class="proc-val"><span id="proc-cpu">—</span><span class="proc-sub" id="proc-cpu-sub"></span></span>
+            </div>
           </div>
         </section>
       </aside>
@@ -240,6 +253,11 @@
         <div class="card transcript-card">
           <div class="transcript-header">
             <h2>Live ASR Recognition Stream</h2>
+            <div class="transcript-legend" id="transcript-legend">
+              <span class="legend-final">confirmed</span>
+              <span class="legend-tentative">tentative</span>
+              <span class="legend-mode" id="stream-mode-label"></span>
+            </div>
             <div class="transcript-meta" id="transcript-meta"></div>
           </div>
           <div class="transcript-box" id="transcript-box">

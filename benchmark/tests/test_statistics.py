@@ -40,3 +40,25 @@ def test_percentile_empty_raises():
     import pytest
     with pytest.raises(ValueError):
         percentile([], 50)
+
+
+def test_percentile_known_values():
+    data = [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert percentile(data, 0) == 1.0
+    assert percentile(data, 50) == 3.0
+    assert percentile(data, 100) == 5.0
+    assert abs(percentile(data, 25) - 2.0) < 1e-9
+    assert abs(percentile(data, 95) - 4.8) < 1e-9      # numpy.percentile default
+
+
+def test_percentile_matches_numpy():
+    import numpy as np
+    data = [0.3, 9.1, 2.2, 7.7, 4.4, 1.0, 8.8]
+    for p in (5, 50, 90, 95, 99):
+        assert abs(percentile(data, p) - float(np.percentile(data, p))) < 1e-9
+
+
+def test_percentile_rejects_out_of_range():
+    import pytest
+    with pytest.raises(ValueError):
+        percentile([1.0], 101)

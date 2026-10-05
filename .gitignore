@@ -217,6 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# pdf
-*.pdfbenchmark/results/*.json
+# files
+*.pdf
+benchmark/results/*.json
 benchmark/results/*.md
+*.jpg
+*.txt

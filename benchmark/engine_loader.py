@@ -2,9 +2,10 @@
 """
 Engine loader: resolves a bench_config entry to an ASR engine instance.
 
-Supports two backends:
-  - "onnx"         → ONNXQwen3ASR (from src/engines/qwen3_onnx_engine.py)
-  - "transformers" → Qwen3ASR     (from src/engines/qwen3_engine.py)
+Supports three backends:
+  - "onnx"         → ONNXQwen3ASR      (from src/engines/qwen3_onnx_engine.py)
+  - "transformers" → Qwen3ASR          (from src/engines/qwen3_engine.py)
+  - "whisper"      → WhisperOnnxEngine (from src/engines/whisper_engine.py)
 
 Each entry in bench_config.yaml["configs"] looks like:
     id: "onnx_int8"
@@ -27,6 +28,9 @@ if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
 
+SUPPORTED_BACKENDS = ("onnx", "transformers", "whisper")
+
+
 def load_engine(config_entry: dict) -> Any:
     """
     Instantiate an ASR engine from a bench_config entry.
@@ -38,7 +42,7 @@ def load_engine(config_entry: dict) -> Any:
         A live engine instance with a .transcribe(audio_path) -> dict method.
 
     Raises:
-        ValueError: If backend is not 'onnx' or 'transformers'.
+        ValueError: If backend is not one of SUPPORTED_BACKENDS.
         FileNotFoundError: If model_config path does not exist.
     """
     import yaml
@@ -62,10 +66,14 @@ def load_engine(config_entry: dict) -> Any:
         from engines.qwen3_engine import Qwen3ASR
         return Qwen3ASR.from_config(model_cfg)
 
+    elif backend == "whisper":
+        from engines.whisper_engine import WhisperOnnxEngine
+        return WhisperOnnxEngine.from_config(model_cfg)
+
     else:
         raise ValueError(
             f"Unknown backend '{backend}'. "
-            f"Supported: 'onnx', 'transformers'."
+            f"Supported: {', '.join(repr(b) for b in SUPPORTED_BACKENDS)}."
         )
 
 

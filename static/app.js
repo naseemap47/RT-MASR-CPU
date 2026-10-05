@@ -26,10 +26,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const startBtn               = document.getElementById("start-btn");
   const hangupBtn              = document.getElementById("hangup-btn");
   const resetBtn               = document.getElementById("reset-btn");
+  const muteBtn                = document.getElementById("mute-btn");
+  const muteIcon               = document.getElementById("mute-icon");
+  const muteLabel              = document.getElementById("mute-label");
   const languageSelect         = document.getElementById("language-select");
   const modelStatusText        = document.getElementById("model-status-text");
   const transcriptBox          = document.getElementById("transcript-box");
   const transcriptMeta         = document.getElementById("transcript-meta");
+  const titleDesc              = document.getElementById("title-desc");
+  const streamModeLabel        = document.getElementById("stream-mode-label");
 
   /* State pill */
   const streamStatePill = document.getElementById("stream-state-pill");
@@ -69,6 +74,8 @@ document.addEventListener("DOMContentLoaded", () => {
   let websocket        = null;
   let audioContext     = null;
   let audioSourceNode  = null;
+  let gainNode         = null;
+  let isMuted          = true;   // playback is muted by default; ASR still receives the audio
   let timerInterval    = null;
   let healthInterval   = null;
   let callStartTime    = 0;
@@ -93,11 +100,67 @@ document.addEventListener("DOMContentLoaded", () => {
     streamStatePill.className = `stream-state-pill ${cfg.cls}`;
   }
 
+  /* ── Active model / stream mode ───────────────────────── */
+  const STREAM_MODE_LABEL = {
+    sliding_window: "sliding window",
+    vad_utterance:  "VAD utterances",
+  };
+
+  function showActiveModel(data) {
+    if (titleDesc && data.active_model && data.active_model !== "(not loaded)") {
+      titleDesc.textContent = `${data.active_model} · ${data.backend} · CPU Inference`;
+    }
+    if (streamModeLabel && data.stream_mode) {
+      streamModeLabel.textContent = STREAM_MODE_LABEL[data.stream_mode] || data.stream_mode;
+    }
+  }
+
+  /* Confirmed text in the normal colour, tentative (may still change) dimmed. */
+  function renderTranscript(committed, tentative) {
+    transcriptBox.textContent = "";
+    if (committed) {
+      const c = document.createElement("span");
+      c.className = "committed";
+      c.textContent = committed;
+      transcriptBox.appendChild(c);
+    }
+    if (tentative) {
+      const t = document.createElement("span");
+      t.className = "tentative";
+      /* CJK text is written without spaces; everything else needs one. */
+      const wide = /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+      const needSpace = committed && !wide.test(committed.slice(-1)) && !wide.test(tentative[0]);
+      t.textContent = (needSpace ? " " : "") + tentative;
+      transcriptBox.appendChild(t);
+    }
+    transcriptBox.scrollTop = transcriptBox.scrollHeight;
+  }
+
+  /* Process CPU% uses the per-core scale (like `top`): 100% = ONE core fully busy, so a
+     multi-threaded model can exceed 100%. The value stays raw; a compact "≈ N cores" tag
+     is added next to it and the full explanation lives in the (i) tooltip. */
+  const procCpuSub = document.getElementById("proc-cpu-sub");
+  function showCpu(data) {
+    if (data.cpu_percent === undefined) return;
+    const pct = Math.round(data.cpu_percent);
+    procCpu.textContent = `${pct}%`;
+    if (procCpuSub) {
+      procCpuSub.textContent = pct > 100 ? `≈ ${(data.cpu_percent / 100).toFixed(1)} cores` : "";
+    }
+    const info = document.getElementById("proc-cpu-info");
+    if (info && data.cpu_cores) {
+      info.dataset.tooltip = "Per-core scale: 100% = one CPU core fully busy. "
+        + "The model runs on several cores at once, so values above 100% are normal "
+        + `(max ${data.cpu_cores * 100}% on this ${data.cpu_cores}-core machine).`;
+    }
+  }
+
   /* ── Health polling ───────────────────────────────────── */
   function checkHealth() {
     fetch("/api/health")
       .then(r => r.json())
       .then(data => {
+        showActiveModel(data);
         if (data.model_ready) {
           modelStatusText.textContent = "MODEL: READY";
           modelStatusText.style.background = "rgba(16,185,129,0.2)";
@@ -110,22 +173,24 @@ document.addEventListener("DOMContentLoaded", () => {
         /* Process telemetry */
         if (data.rss_mb !== undefined)  procRss.textContent     = `${data.rss_mb} MB`;
         if (data.num_threads !== undefined) procThreads.textContent = data.num_threads;
-        if (data.cpu_percent !== undefined) procCpu.textContent  = `${data.cpu_percent}%`;
+        showCpu(data);
       })
       .catch(() => setTimeout(checkHealth, 3000));
   }
   checkHealth();
 
   /* Poll health for process telemetry while call is active */
+  function pollTelemetry() {
+    fetch("/api/health", { cache: "no-store" }).then(r => r.json()).then(data => {
+      if (data.rss_mb !== undefined)  procRss.textContent     = `${data.rss_mb} MB`;
+      if (data.num_threads !== undefined) procThreads.textContent = data.num_threads;
+      showCpu(data);
+    }).catch(() => {});
+  }
   function startHealthPolling() {
     if (healthInterval) clearInterval(healthInterval);
-    healthInterval = setInterval(() => {
-      fetch("/api/health").then(r => r.json()).then(data => {
-        if (data.rss_mb !== undefined)  procRss.textContent     = `${data.rss_mb} MB`;
-        if (data.num_threads !== undefined) procThreads.textContent = data.num_threads;
-        if (data.cpu_percent !== undefined) procCpu.textContent  = `${data.cpu_percent}%`;
-      }).catch(() => {});
-    }, 2000);
+    pollTelemetry();                                   // first reading immediately
+    healthInterval = setInterval(pollTelemetry, 1000); // then every second
   }
   function stopHealthPolling() {
     if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }
@@ -197,6 +262,20 @@ document.addEventListener("DOMContentLoaded", () => {
   hangupBtn.onclick = endCallLeg;
   resetBtn.onclick = resetUI;
 
+  /* ── Playback mute (default: muted) ───────────────────── */
+  const ICON_MUTED = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6v4h3l4 3V3L5 6H2z"/><path d="M11 5.5l4 5M15 5.5l-4 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>`;
+  const ICON_ON    = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6v4h3l4 3V3L5 6H2z"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.7a6 6 0 0 1 0 8.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>`;
+
+  function applyMute() {
+    if (gainNode) gainNode.gain.value = isMuted ? 0 : 1;
+    muteBtn.classList.toggle("is-muted", isMuted);
+    muteBtn.setAttribute("aria-pressed", String(isMuted));
+    muteLabel.textContent = isMuted ? "Sound: Off (muted)" : "Sound: On";
+    muteIcon.innerHTML = isMuted ? ICON_MUTED : ICON_ON;   // static markup, no user data
+  }
+  muteBtn.onclick = () => { isMuted = !isMuted; applyMute(); };
+  applyMute();
+
   /* ── Metric helpers ───────────────────────────────────── */
   function setMetric(el, text) {
     if (!el) return;
@@ -250,7 +329,8 @@ document.addEventListener("DOMContentLoaded", () => {
       transcriptMeta.textContent =
         `audio: ${m.audio_duration_s.toFixed(2)}s · ` +
         `infer: ${(m.infer_latency_ms/1000).toFixed(2)}s · ` +
-        (m.inference_passes != null ? `pass #${m.inference_passes}` : "");
+        (m.inference_passes != null ? `pass #${m.inference_passes}` : "") +
+        (m.window_start_s != null ? ` · window ${m.window_start_s.toFixed(1)}s→${(m.window_start_s + m.window_s).toFixed(1)}s` : "");
     }
   }
 
@@ -315,6 +395,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = JSON.parse(event.data);
 
       if (data.type === "call_ready") {
+        if (streamModeLabel && data.stream_mode) {
+          streamModeLabel.textContent = STREAM_MODE_LABEL[data.stream_mode] || data.stream_mode;
+        }
         setState("buffering");
         transcriptBox.innerHTML = "<span class='placeholder'>Call active — streaming audio chunks…</span>";
         timerInterval = setInterval(updateCallTimer, 1000);
@@ -326,12 +409,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
       } else if (data.type === "transcript_delta") {
         if (currentState !== "transcribing") setState("transcribing");
-        transcriptBox.textContent = data.full_text || "";
+        if (data.committed_text !== undefined) {
+          renderTranscript(data.committed_text, data.tentative_text || "");
+        } else {
+          transcriptBox.textContent = data.full_text || "";
+        }
         applyMetrics(data.metrics);
 
       } else if (data.type === "call_ended") {
         setState("completed");
-        transcriptBox.textContent = data.final_text || "Call completed.";
+        if (data.final_text) renderTranscript(data.final_text, "");
+        else transcriptBox.textContent = "Call completed.";
         if (data.metrics) applyMetrics(data.metrics);
         _teardown();
       }
@@ -356,7 +444,10 @@ document.addEventListener("DOMContentLoaded", () => {
       if (audioContext.state === "suspended") audioContext.resume();
       audioSourceNode = audioContext.createBufferSource();
       audioSourceNode.buffer = audioBuffer;
-      audioSourceNode.connect(audioContext.destination);
+      gainNode = audioContext.createGain();
+      gainNode.gain.value = isMuted ? 0 : 1;
+      audioSourceNode.connect(gainNode);
+      gainNode.connect(audioContext.destination);
       audioSourceNode.start(0);
     }
 
@@ -396,6 +487,7 @@ document.addEventListener("DOMContentLoaded", () => {
       audioSourceNode.disconnect();
       audioSourceNode = null;
     }
+    if (gainNode) { try { gainNode.disconnect(); } catch (_) {} gainNode = null; }
     if (websocket) { try { websocket.close(); } catch (_) {} websocket = null; }
     if (audioContext) { audioContext.close(); audioContext = null; }
     startBtn.disabled  = false;

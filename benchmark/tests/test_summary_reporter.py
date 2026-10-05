@@ -29,7 +29,7 @@ def test_summary_reporter_creates_file(tmp_path):
     assert os.path.exists(path)
     with open(path) as f:
         content = f.read()
-    assert "# Qwen3-ASR CPU Benchmark Report" in content
+    assert "# ASR CPU Benchmark Report" in content
     assert "Hardware" in content
 
 

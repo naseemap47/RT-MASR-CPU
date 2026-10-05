@@ -1,0 +1,105 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/models.yaml  —  Model registry
+#
+# Lists every available model variant with its config file path,
+# backend, and local model directory.
+#
+# The loader (src/core/config.py) reads config.yaml → default_model → looks up
+# this registry → loads the referenced per-model YAML.
+#
+# To add a new variant, append an entry here and create its config file in
+# config/models/.
+# ──────────────────────────────────────────────────────────────────────────────
+
+models:
+
+  # ── ONNX backend (recommended for production / low-latency) ──────────────
+  - name: "qwen3_onnx"
+    config: "config/models/qwen3_onnx.yaml"
+    backend: "onnx"
+    engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
+    model_dir: "models/qwen3-asr-onnx"
+    hf_repo: "Daumee/Qwen3-ASR-0.6B-ONNX-CPU"
+    description: >
+      Pure ONNX Runtime inference — no PyTorch required.
+      Fastest CPU option with INT8 quantised decoder and true token-streaming.
+
+  # ── Transformers backend — 0.6B ───────────────────────────────────────────
+  - name: "qwen3_0.6b"
+    config: "config/models/qwen3_0.6b.yaml"
+    backend: "transformers"
+    engine_class: "Qwen3ASR"               # src/engines/qwen3_engine.py
+    model_dir: "models/qwen3-asr-0.6b"
+    hf_repo: "Qwen/Qwen3-ASR-0.6B"
+    description: >
+      HuggingFace Transformers inference with the 0.6B parameter model.
+      Balanced speed/accuracy trade-off for CPU. Requires PyTorch.
+
+  # ── Transformers backend — 1.7B ───────────────────────────────────────────
+  - name: "qwen3_1.7b"
+    config: "config/models/qwen3_1.7b.yaml"
+    backend: "transformers"
+    engine_class: "Qwen3ASR"               # src/engines/qwen3_engine.py
+    model_dir: "models/qwen3-asr-1.7b"
+    hf_repo: "Qwen/Qwen3-ASR-1.7B"
+    description: >
+      HuggingFace Transformers inference with the 1.7B parameter model.
+      Highest accuracy; ~3x slower than 0.6B on CPU. Requires PyTorch.
+
+  # ── Whisper ONNX — INT8 (smallest, fastest on CPU): tiny/base/small/medium ─
+  #    All four sizes share one folder: models/whisper_int8/
+  - name: "whisper_int8_tiny"
+    config: "config/models/whisper_int8_tiny.yaml"
+    backend: "whisper"
+    engine_class: "WhisperOnnxEngine"      # src/engines/whisper_engine.py
+    model_dir: "models/whisper_int8"
+    description: >
+      OpenAI Whisper tiny ONNX INT8 — smallest and fastest, lowest accuracy.
+      Multilingual with auto language detection.
+
+  - name: "whisper_int8_base"
+    config: "config/models/whisper_int8_base.yaml"
+    backend: "whisper"
+    engine_class: "WhisperOnnxEngine"      # src/engines/whisper_engine.py
+    model_dir: "models/whisper_int8"
+    description: >
+      OpenAI Whisper base ONNX INT8 — small and fast, better accuracy than tiny.
+      Multilingual with auto language detection.
+
+  - name: "whisper_int8_small"
+    config: "config/models/whisper_int8_small.yaml"
+    backend: "whisper"
+    engine_class: "WhisperOnnxEngine"      # src/engines/whisper_engine.py
+    model_dir: "models/whisper_int8"
+    description: >
+      OpenAI Whisper small ONNX INT8 — balanced speed/accuracy on CPU.
+      Multilingual with auto language detection.
+
+  - name: "whisper_int8_medium"
+    config: "config/models/whisper_int8_medium.yaml"
+    backend: "whisper"
+    engine_class: "WhisperOnnxEngine"      # src/engines/whisper_engine.py
+    model_dir: "models/whisper_int8"
+    description: >
+      OpenAI Whisper medium ONNX INT8 — highest accuracy of the INT8 sizes, slowest.
+      Multilingual with auto language detection.
+
+  # ── Whisper ONNX — FP16 ───────────────────────────────────────────────────
+  - name: "whisper_fp16"
+    config: "config/models/whisper_fp16.yaml"
+    backend: "whisper"
+    engine_class: "WhisperOnnxEngine"      # src/engines/whisper_engine.py
+    model_dir: "models/whisper_fp16"
+    description: >
+      OpenAI Whisper ONNX FP16 — half-precision weights, balanced
+      speed/accuracy trade-off. Multilingual with auto language detection.
+
+  # ── Whisper ONNX — FP32 ───────────────────────────────────────────────────
+  - name: "whisper_fp32"
+    config: "config/models/whisper_fp32.yaml"
+    backend: "whisper"
+    engine_class: "WhisperOnnxEngine"      # src/engines/whisper_engine.py
+    model_dir: "models/whisper_fp32"
+    description: >
+      OpenAI Whisper ONNX FP32 — full-precision weights, highest accuracy.
+      Multilingual with auto language detection.

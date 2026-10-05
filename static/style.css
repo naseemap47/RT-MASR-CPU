@@ -248,6 +248,10 @@ h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 
 .btn-danger:hover:not(:disabled)   { box-shadow: 0 0 16px var(--danger-glow); transform: translateY(-1px); }
 .btn-ghost    { background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid var(--border); }
 .btn-ghost:hover:not(:disabled)    { background: rgba(255,255,255,0.09); color: var(--text); }
+.btn-mute { width: 100%; margin-bottom: 16px; flex: none; }
+.btn-mute.is-muted { color: var(--text-dim); }
+.btn-mute:not(.is-muted) { color: #6ee7b7; border-color: rgba(110,231,183,0.4); }
+.btn-mute .mute-icon { display: inline-flex; }
 .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
 
 /* ── Process telemetry mini-panel ──────────────────── */
@@ -259,6 +263,31 @@ h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 
 .proc-row { display: flex; justify-content: space-between; align-items: center; }
 .proc-label { font-size: 0.7rem; color: var(--text-muted); }
 .proc-val   { font-size: 0.72rem; font-weight: 600; color: var(--text); font-family: var(--font-mono); }
+.proc-sub   { margin-left: 6px; font-size: 0.62rem; font-weight: 500; color: var(--text-muted); }
+.proc-sub:empty { display: none; }
+
+/* Small "i" badge with a hover/focus tooltip (no always-visible explanatory text). */
+.info-dot {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 13px; height: 13px; margin-left: 5px; border-radius: 50%;
+  border: 1px solid var(--border); color: var(--text-dim);
+  font: italic 700 0.55rem/1 serif; cursor: help; vertical-align: middle;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.info-dot:hover, .info-dot:focus { color: var(--text); border-color: var(--text-muted); outline: none; }
+.info-dot::after {
+  content: attr(data-tooltip);
+  position: absolute; left: -6px; top: calc(100% + 8px); z-index: 20;
+  width: 210px; padding: 8px 10px; border-radius: 6px;
+  background: #0f172a; border: 1px solid var(--border); color: var(--text);
+  font-family: inherit; font-size: 0.66rem; font-weight: 400; line-height: 1.45; font-style: normal;
+  text-transform: none; letter-spacing: 0; text-align: left; white-space: normal;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  opacity: 0; visibility: hidden; transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+  pointer-events: none;
+}
+.info-dot:hover::after, .info-dot:focus::after { opacity: 1; visibility: visible; transform: none; }
 
 /* ── Telemetry section label ────────────────────────── */
 .telemetry-section-label {
@@ -375,6 +404,12 @@ h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 
 }
 .transcript-box::-webkit-scrollbar { width: 4px; }
 .transcript-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.transcript-box .tentative { color: var(--text-dim); font-style: italic; opacity: 0.8; }
+.transcript-legend { display: flex; gap: 10px; align-items: center; font-size: 0.68rem; font-family: var(--font-mono); }
+.legend-final      { color: #6ee7b7; }
+.legend-tentative  { color: var(--text-dim); font-style: italic; }
+.legend-mode       { color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.legend-mode:empty { display: none; }
 .placeholder { color: var(--text-dim); font-size: 0.9rem; font-style: italic; }
 
 .loading-text { color: var(--text-dim); font-size: 0.8rem; padding: 6px 0; }

@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from benchmark.metrics.asr_metrics import normalise, wer, cer
+from benchmark.metrics.asr_metrics import normalise, wer, cer, wer_counts, cer_counts
 
 
 @dataclass
@@ -29,6 +29,10 @@ class AccuracyResult:
     normalised_hyp: str
     normalised_ref: str
     score: float         # WER or CER value
+    errors: int = 0      # edit distance (word- or char-level)
+    ref_len: int = 0     # reference length in words (WER) or characters (CER)
+    detected_language: str = ""   # language reported by the engine, if any
+    verified: bool = True         # False if the reference transcript is a draft
 
 
 class AccuracyRunner:
@@ -76,7 +80,7 @@ class AccuracyRunner:
             print(f"  [accuracy] {audio_file} ({lang}, {metric})")
             try:
                 result = self.engine.transcribe(audio_file)
-                hypothesis = result.get("text", "")
+                hypothesis = result.get("text", "") or ""
             except Exception as exc:
                 print(f"  [accuracy] ERROR on {audio_file}: {exc}")
                 continue
@@ -85,8 +89,10 @@ class AccuracyRunner:
             norm_ref = normalise(reference_text, lang)
 
             if metric == "cer":
-                score = cer(hypothesis, reference_text)
+                errors, ref_len = cer_counts(hypothesis, reference_text, lang)
+                score = cer(hypothesis, reference_text, lang)
             else:
+                errors, ref_len = wer_counts(hypothesis, reference_text, lang)
                 score = wer(hypothesis, reference_text, lang)
 
             results.append(AccuracyResult(
@@ -99,6 +105,10 @@ class AccuracyRunner:
                 normalised_hyp=norm_hyp,
                 normalised_ref=norm_ref,
                 score=score,
+                errors=errors,
+                ref_len=ref_len,
+                detected_language=str(result.get("language", "") or ""),
+                verified=bool(ref.get("verified", True)),
             ))
 
         return results

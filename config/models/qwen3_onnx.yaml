@@ -35,7 +35,7 @@ engine:
   onnx_dir: "models/qwen3-asr-onnx"
   num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
   quantize: "int8"               # "int8" | "fp32"  (int8 decoder is smaller and faster)
-  language: null                 # null = auto-detect; "English" | "Mandarin" | "Indonesian"
+  language: null                 # null = auto-detect; "English" | "Chinese" | "Indonesian"  (aliases en / zh / mandarin / id also work)
 
 inference:
   max_new_tokens: 512

@@ -16,7 +16,10 @@ from typing import Any
 
 def _fmt(v: Any, decimals: int = 3) -> str:
     """Format a numeric value for table display."""
-    if isinstance(v, float):
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        v = float(v)
+        if round(v, decimals) == 0:   # avoid "-0" / "-0.000"
+            v = 0.0
         return f"{v:.{decimals}f}"
     return str(v)
 
@@ -54,7 +57,7 @@ class SummaryReporter:
         """
         lines: list[str] = []
         ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        lines.append(f"# Qwen3-ASR CPU Benchmark Report\n")
+        lines.append("# ASR CPU Benchmark Report\n")
         lines.append(f"**Generated:** {ts}\n")
 
         # ── Hardware Fingerprint ──────────────────────────────────────────
@@ -75,6 +78,13 @@ class SummaryReporter:
             lines.append(_table(["Item", "Value"], rows) + "\n")
         else:
             lines.append("_(no hardware info)_\n")
+
+        # ── Run parameters ────────────────────────────────────────────────
+        params = all_results.get("run_params", {})
+        if params:
+            lines.append("## Run Parameters\n")
+            lines.append(_table(["Parameter", "Value"],
+                                [[str(k), str(v)] for k, v in params.items()]) + "\n")
 
         # ── Model Load Times ──────────────────────────────────────────────
         load_results = all_results.get("load", [])
@@ -126,6 +136,30 @@ class SummaryReporter:
         else:
             lines.append("_(no latency results)_\n")
 
+        # ── Overall latency per config ────────────────────────────────────
+        lines.append("### Overall per config (all audio files, measured runs)\n")
+        lines.append("> Overall RTF = total processing time / total audio time "
+                     "(duration-weighted, so long files count more than short ones).\n")
+        if latency_results:
+            per_cfg: dict[str, dict] = {}
+            for lr in latency_results:
+                d = per_cfg.setdefault(getattr(lr, "config_id", "?"),
+                                       {"lat": 0.0, "aud": 0.0, "n": 0})
+                for r in getattr(lr, "raw_results", []):
+                    d["lat"] += r.latency_s
+                    d["aud"] += r.audio_duration_s
+                    d["n"] += 1
+            rows = []
+            for cfg, d in per_cfg.items():
+                rtf = d["lat"] / d["aud"] if d["aud"] > 0 else 0.0
+                rows.append([cfg, str(d["n"]), _fmt(d["aud"], 1) + "s",
+                             _fmt(d["lat"], 1) + "s", _fmt(rtf, 3)])
+            lines.append(_table(
+                ["Config", "Calls", "Total Audio", "Total Processing", "Overall RTF"], rows
+            ) + "\n")
+        else:
+            lines.append("_(no latency results)_\n")
+
         # ── CPU / Memory Under Load ───────────────────────────────────────
         lines.append("## CPU & Memory Utilisation (Latency Runs)\n")
         if latency_results:
@@ -156,20 +190,50 @@ class SummaryReporter:
         accuracy_results = all_results.get("accuracy", [])
         lines.append("## Accuracy (WER / CER)\n")
         lines.append("> WER = word error rate (English, Indonesian). CER = character error rate (Mandarin).\n")
-        lines.append("> Normalisation: NFKC + lowercase + strip punctuation for EN/ID; NFKC + strip CJK punct for ZH.\n")
+        lines.append("> Normalisation: NFKC + lowercase + strip punctuation (apostrophes deleted) for EN/ID; "
+                     "NFKC + strip all punctuation/symbols for ZH.\n")
+        lines.append("> Corpus rate = total edits / total reference length (long files weigh more); "
+                     "Mean = unweighted average of per-file scores.\n")
         if accuracy_results:
+            unverified = any(not getattr(ar, "verified", True) for ar in accuracy_results)
+            if unverified:
+                lines.append("> **\\* = draft reference transcript (not human-verified). "
+                             "Scores against it measure agreement with the draft, not true accuracy.**\n")
+
+            groups: dict[tuple, dict] = {}
+            for ar in accuracy_results:
+                key = (getattr(ar, "config_id", "?"), getattr(ar, "lang", "?"),
+                       str(getattr(ar, "metric", "?")).upper(),
+                       bool(getattr(ar, "verified", True)))
+                g = groups.setdefault(key, {"err": 0, "ref": 0, "scores": []})
+                g["err"] += getattr(ar, "errors", 0)
+                g["ref"] += getattr(ar, "ref_len", 0)
+                g["scores"].append(getattr(ar, "score", 0.0))
+            rows = []
+            for (cfg, lang, metric, ok), g in groups.items():
+                corpus = g["err"] / g["ref"] if g["ref"] > 0 else 0.0
+                mean = sum(g["scores"]) / len(g["scores"])
+                rows.append([cfg, lang + ("" if ok else "\\*"), metric, str(len(g["scores"])),
+                             _fmt(corpus, 4), _fmt(mean, 4)])
+            lines.append("### Aggregate\n")
+            lines.append(_table(
+                ["Config", "Lang", "Metric", "Files", "Corpus Rate", "Mean Rate"], rows
+            ) + "\n")
+
             rows = []
             for ar in accuracy_results:
                 cfg    = getattr(ar, "config_id", "?")
                 af     = os.path.basename(getattr(ar, "audio_file", "?"))
-                lang   = getattr(ar, "lang", "?")
-                metric = getattr(ar, "metric", "?").upper()
+                lang   = getattr(ar, "lang", "?") + ("" if getattr(ar, "verified", True) else "\\*")
+                det    = getattr(ar, "detected_language", "") or "-"
+                metric = str(getattr(ar, "metric", "?")).upper()
                 score  = _fmt(getattr(ar, "score", 0.0), 4)
                 hyp    = getattr(ar, "normalised_hyp", "")[:60]
                 ref    = getattr(ar, "normalised_ref", "")[:60]
-                rows.append([cfg, af, lang, metric, score, hyp, ref])
+                rows.append([cfg, af, lang, det, metric, score, hyp, ref])
+            lines.append("### Per file\n")
             lines.append(_table(
-                ["Config", "Audio", "Lang", "Metric", "Score",
+                ["Config", "Audio", "Lang", "Detected", "Metric", "Score",
                  "Hypothesis (normalised)", "Reference (normalised)"],
                 rows
             ) + "\n")
@@ -179,6 +243,9 @@ class SummaryReporter:
         # ── Concurrency ───────────────────────────────────────────────────
         concurrency_results = all_results.get("concurrency", [])
         lines.append("## Concurrency Scaling\n")
+        lines.append("> Every level runs the same audio workload on one shared engine. "
+                     "Throughput = audio seconds transcribed per wall-clock second "
+                     "(x real-time, aggregate across all legs). RTF is per call.\n")
         if concurrency_results:
             rows = []
             for cr in concurrency_results:
@@ -186,27 +253,37 @@ class SummaryReporter:
                 legs  = str(getattr(cr, "n_legs", 0))
                 ls    = getattr(cr, "latency_stats", {})
                 rs    = getattr(cr, "rtf_stats", {})
-                thru  = _fmt(getattr(cr, "throughput_audio_hours_per_wall_hour", 0), 3)
+                thru  = _fmt(getattr(cr, "throughput_audio_hours_per_wall_hour", 0), 2)
+                wall  = _fmt(getattr(cr, "wall_elapsed_s", 0.0), 1) + "s"
+                ncall = str(getattr(cr, "n_calls", 0))
                 errs  = str(getattr(cr, "error_count", 0))
                 sm    = getattr(cr, "system_metrics", {})
                 prss  = _fmt(sm.get("peak_rss_mb", 0), 0)
                 rows.append([
-                    cfg, legs,
+                    cfg, legs, ncall, wall,
                     _fmt(ls.get("p50",  0), 3)+"s",
                     _fmt(ls.get("p95",  0), 3)+"s",
                     _fmt(ls.get("p99",  0), 3)+"s",
                     _fmt(rs.get("mean", 0), 3),
-                    thru+" audio-hr/hr",
+                    thru+"x",
                     errs,
                     prss+" MB",
                 ])
             lines.append(_table(
-                ["Config", "Legs", "Lat P50", "Lat P95", "Lat P99",
+                ["Config", "Legs", "Calls", "Wall", "Lat P50", "Lat P95", "Lat P99",
                  "RTF Mean", "Throughput", "Errors", "Peak RSS"],
                 rows
             ) + "\n")
         else:
             lines.append("_(no concurrency results)_\n")
+
+        # ── Failures ──────────────────────────────────────────────────────
+        failures = all_results.get("failures", [])
+        if failures:
+            lines.append("## Failed Configs\n")
+            lines.append(_table(["Config", "Stage", "Error"],
+                                [[str(f.get("config_id", "?")), str(f.get("stage", "?")),
+                                  str(f.get("error", "")).replace("|", "/")[:200]] for f in failures]) + "\n")
 
         # ── Write file ────────────────────────────────────────────────────
         ts_file = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")

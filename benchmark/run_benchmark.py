@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 # benchmark/run_benchmark.py
 """
-Qwen3-ASR CPU Benchmark Pipeline — CLI Entry Point.
+ASR CPU Benchmark Pipeline (Qwen3-ASR + Whisper) — CLI Entry Point.
 
 Usage:
     python3 benchmark/run_benchmark.py
-    python3 benchmark/run_benchmark.py --models onnx_int8,transformers_bf16_0.6b
+    python3 benchmark/run_benchmark.py --models onnx_int8,whisper_int8_tiny
     python3 benchmark/run_benchmark.py --legs 1,2,4 --runs 5
-    python3 benchmark/run_benchmark.py --skip-accuracy
+    python3 benchmark/run_benchmark.py --skip-accuracy --skip-concurrency
     python3 benchmark/run_benchmark.py --output-dir /tmp/bench_results
 
-Must be run from the project root (RT-MASR-CPU/).
+Relative paths in bench_config.yaml and in the model YAMLs are resolved from the
+project root (the script changes into it), so it can be launched from anywhere.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+import traceback
 from pathlib import Path
 
 # ── Ensure project root + src/ are importable ─────────────────────────────────
@@ -26,21 +28,21 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 import yaml
 
-from benchmark.engine_loader import load_engine, engine_factory
+from benchmark.engine_loader import engine_factory
 from benchmark.reporters.hardware_info import collect_hardware_info
 from benchmark.reporters.json_reporter import JsonReporter
 from benchmark.reporters.summary_reporter import SummaryReporter
 from benchmark.runners.accuracy_runner import AccuracyRunner
 from benchmark.runners.concurrency_runner import ConcurrencyRunner
 from benchmark.runners.latency_runner import LatencyRunner
-from benchmark.runners.load_timer import measure_load
+from benchmark.runners.load_timer import measure_load_with_engine, release_memory
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Qwen3-ASR CPU Benchmarking Pipeline",
+        description="ASR CPU Benchmarking Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -71,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip the accuracy runner (faster, perf-only run)",
     )
     parser.add_argument(
+        "--skip-concurrency",
+        action="store_true",
+        help="Skip the concurrency runner",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Output directory for results (default: from bench_config.yaml)",
@@ -93,16 +100,96 @@ def collect_audio_files(audio_cfg: dict) -> list[str]:
     return files
 
 
+class _StageError(Exception):
+    """Carries the failing stage name; the real error is in __cause__."""
+    def __init__(self, stage: str) -> None:
+        super().__init__(stage)
+        self.stage = stage
+
+
+def _benchmark_one_config(
+    config_entry, args, references, all_audio, conc_audio,
+    n_runs, warmup_runs, legs_list, n_rounds,
+    load_out, latency_out, accuracy_out, concurrency_out,
+) -> None:
+    """
+    Run every stage for one config.
+
+    Kept in its own function so the engine and runners go out of scope when it
+    returns -- the next config's cold-load RSS baseline is then not polluted by
+    this config's memory.
+    """
+    config_id    = config_entry["id"]
+    display_name = config_entry.get("display_name", config_id)
+    print(f"\n{'='*70}")
+    print(f"  Config: {display_name}")
+    print(f"{'='*70}")
+
+    stage = "load"
+    try:
+        # ── 1. Load (cold start) — the loaded engine is reused below ──────
+        print("\n[1/4] Loading engine (cold-start timing)...")
+        load_result, engine = measure_load_with_engine(
+            config_id, engine_factory(config_entry)
+        )
+        load_out.append(load_result)
+        print(f"  Load time : {load_result.load_time_s:.2f}s")
+        print(f"  RSS delta : {load_result.rss_delta_mb:.0f} MB")
+
+        # ── 2. Latency & RTF ──────────────────────────────────────────────
+        stage = "latency"
+        print("\n[2/4] Latency & RTF benchmark...")
+        latency_out.extend(LatencyRunner(
+            config_id=config_id, engine=engine, audio_files=all_audio,
+            n_runs=n_runs, warmup_runs=warmup_runs,
+        ).run())
+
+        # ── 3. Accuracy ───────────────────────────────────────────────────
+        if not args.skip_accuracy:
+            stage = "accuracy"
+            print("\n[3/4] Accuracy benchmark (WER/CER)...")
+            accuracy_out.extend(AccuracyRunner(
+                config_id=config_id, engine=engine, references=references,
+            ).run())
+        else:
+            print("\n[3/4] Accuracy benchmark SKIPPED (--skip-accuracy).")
+
+        # ── 4. Concurrency ────────────────────────────────────────────────
+        if not args.skip_concurrency:
+            stage = "concurrency"
+            print("\n[4/4] Concurrency benchmark...")
+            concurrency_out.extend(ConcurrencyRunner(
+                config_id=config_id,
+                engine_factory=lambda: engine,   # reuse the already-loaded engine
+                audio_files=conc_audio,
+                legs_list=legs_list,
+                n_rounds=n_rounds,
+            ).run())
+        else:
+            print("\n[4/4] Concurrency benchmark SKIPPED (--skip-concurrency).")
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        raise _StageError(stage) from exc
+
+
 # ── Main orchestration ────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()
-    cfg = load_bench_config(args.config)
+
+    # Resolve user-supplied paths against the launch directory, *then* switch to
+    # the project root so every relative path inside the configs works.
+    config_path = os.path.abspath(args.config)
+    cli_output_dir = os.path.abspath(args.output_dir) if args.output_dir else None
+    os.chdir(_PROJECT_ROOT)
+
+    cfg = load_bench_config(config_path)
 
     # Apply CLI overrides
     n_runs      = args.runs     if args.runs     is not None else cfg.get("runs", 3)
     warmup_runs = cfg.get("warmup_runs", 1)
-    output_dir  = args.output_dir if args.output_dir else cfg.get("output_dir", "benchmark/results")
+    output_dir  = cli_output_dir or cfg.get("output_dir", "benchmark/results")
     legs_list   = (
         [int(x) for x in args.legs.split(",")]
         if args.legs else
@@ -113,106 +200,104 @@ def main() -> None:
     # Filter configs
     all_configs = cfg.get("configs", [])
     if args.models:
-        wanted = set(args.models.split(","))
-        all_configs = [c for c in all_configs if c["id"] in wanted]
+        wanted = [m.strip() for m in args.models.split(",") if m.strip()]
+        known = {c["id"] for c in all_configs}
+        unknown = [m for m in wanted if m not in known]
+        if unknown:
+            print(f"Unknown config id(s): {unknown}. Available: {sorted(known)}")
+            sys.exit(1)
+        all_configs = [c for c in all_configs if c["id"] in set(wanted)]
     if not all_configs:
         print("No configs selected. Check --models or bench_config.yaml.")
         sys.exit(1)
 
-    # Audio files
-    audio_cfg     = cfg.get("audio", {})
-    all_audio     = collect_audio_files(audio_cfg)
-    refs_file     = cfg.get("references_file", "benchmark/data/references.yaml")
+    # Audio files (latency) — warn about, and drop, missing files up front
+    all_audio = collect_audio_files(cfg.get("audio", {}))
+    missing = [a for a in all_audio if not os.path.exists(a)]
+    for a in missing:
+        print(f"WARNING: audio file missing, skipped: {a}")
+    all_audio = [a for a in all_audio if os.path.exists(a)]
+    if not all_audio:
+        print("No audio files found. Check 'audio' in bench_config.yaml.")
+        sys.exit(1)
 
+    # Concurrency workload: identical for every config and every legs level
+    conc_audio = [a for a in cfg.get("concurrency_audio", all_audio[:1]) if os.path.exists(a)]
+    if not conc_audio:
+        conc_audio = all_audio[:1]
+
+    refs_file = cfg.get("references_file", "benchmark/data/references.yaml")
     with open(refs_file, "r") as f:
-        refs_data = yaml.safe_load(f)
-    references: list[dict] = refs_data.get("references", [])
+        references: list[dict] = yaml.safe_load(f).get("references", [])
 
     # Result containers
-    all_load_results:       list = []
-    all_latency_results:    list = []
-    all_accuracy_results:   list = []
+    all_load_results:        list = []
+    all_latency_results:     list = []
+    all_accuracy_results:    list = []
     all_concurrency_results: list = []
+    failures:                list = []
+
+    interrupted = False
 
     # ── Per-config loop ───────────────────────────────────────────────────
     for config_entry in all_configs:
-        config_id   = config_entry["id"]
-        display_name = config_entry.get("display_name", config_id)
-        print(f"\n{'='*70}")
-        print(f"  Config: {display_name}")
-        print(f"{'='*70}")
-
-        # ── 1. Load timing (cold start) ───────────────────────────────────
-        print("\n[1/4] Measuring cold-start load time...")
-        factory = engine_factory(config_entry)
-        load_result = measure_load(config_id, factory)
-        all_load_results.append(load_result)
-        print(f"  Load time : {load_result.load_time_s:.2f}s")
-        print(f"  RSS delta : {load_result.rss_delta_mb:.0f} MB")
-
-        # ── 2. Load engine for steady-state runs ──────────────────────────
-        print("\n[2/4] Loading engine for latency / accuracy / concurrency runs...")
-        engine = load_engine(config_entry)
-
-        # ── 3. Latency & RTF ─────────────────────────────────────────────
-        print("\n[3/4] Latency & RTF benchmark...")
-        latency_runner = LatencyRunner(
-            config_id=config_id,
-            engine=engine,
-            audio_files=all_audio,
-            n_runs=n_runs,
-            warmup_runs=warmup_runs,
-        )
-        latency_summaries = latency_runner.run()
-        all_latency_results.extend(latency_summaries)
-
-        # ── 4. Accuracy ───────────────────────────────────────────────────
-        if not args.skip_accuracy:
-            print("\n[4/4a] Accuracy benchmark (WER/CER)...")
-            acc_runner = AccuracyRunner(
-                config_id=config_id,
-                engine=engine,
-                references=references,
+        config_id = config_entry["id"]
+        try:
+            _benchmark_one_config(
+                config_entry, args, references, all_audio, conc_audio,
+                n_runs, warmup_runs, legs_list, n_rounds,
+                all_load_results, all_latency_results,
+                all_accuracy_results, all_concurrency_results,
             )
-            accuracy_results = acc_runner.run()
-            all_accuracy_results.extend(accuracy_results)
-        else:
-            print("\n[4/4a] Accuracy benchmark SKIPPED (--skip-accuracy).")
+        except KeyboardInterrupt:
+            print("\nInterrupted — writing partial results.")
+            failures.append({"config_id": config_id, "stage": "interrupted", "error": "KeyboardInterrupt"})
+            interrupted = True
+        except _StageError as exc:
+            # One broken config must not throw away the results of the others.
+            traceback.print_exception(exc.__cause__)
+            failures.append({"config_id": config_id, "stage": exc.stage,
+                             "error": f"{type(exc.__cause__).__name__}: {exc.__cause__}"})
+        finally:
+            # _benchmark_one_config's locals (engine, runners) are already gone;
+            # hand the freed heap back to the OS before the next cold-load measurement.
+            release_memory()
 
-        # ── 5. Concurrency ────────────────────────────────────────────────
-        print("\n[4/4b] Concurrency benchmark...")
-        conc_runner = ConcurrencyRunner(
-            config_id=config_id,
-            engine_factory=engine_factory(config_entry),
-            audio_files=all_audio,
-            legs_list=legs_list,
-            n_rounds=n_rounds,
-        )
-        conc_results = conc_runner.run()
-        all_concurrency_results.extend(conc_results)
+        if interrupted:
+            break
 
     # ── Reporting ─────────────────────────────────────────────────────────
     print(f"\n{'='*70}")
     print("  Generating Reports")
     print(f"{'='*70}")
 
-    hardware_info = collect_hardware_info()
     all_results = {
-        "hardware":    hardware_info,
+        "hardware":    collect_hardware_info(),
+        "run_params": {
+            "configs":            ", ".join(c["id"] for c in all_configs),
+            "latency_runs":       n_runs,
+            "latency_warmup":     warmup_runs,
+            "latency_audio":      len(all_audio),
+            "concurrency_legs":   legs_list if not args.skip_concurrency else "skipped",
+            "concurrency_rounds": n_rounds,
+            "concurrency_audio":  ", ".join(os.path.basename(a) for a in conc_audio),
+        },
         "load":        all_load_results,
         "latency":     all_latency_results,
         "accuracy":    all_accuracy_results,
         "concurrency": all_concurrency_results,
+        "failures":    failures,
     }
 
-    json_reporter    = JsonReporter(output_dir=output_dir)
-    summary_reporter = SummaryReporter(output_dir=output_dir)
-
-    json_path    = json_reporter.save(all_results)
-    summary_path = summary_reporter.render(all_results)
+    json_path    = JsonReporter(output_dir=output_dir).save(all_results)
+    summary_path = SummaryReporter(output_dir=output_dir).render(all_results)
 
     print(f"\n✓ Raw JSON   : {json_path}")
     print(f"✓ Summary MD : {summary_path}")
+    if failures:
+        print(f"\n⚠ {len(failures)} config(s) failed: "
+              + ", ".join(f"{f['config_id']} ({f['stage']})" for f in failures))
+        sys.exit(2)
     print("\nBenchmark complete.")
 
 

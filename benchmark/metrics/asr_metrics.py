@@ -58,16 +58,25 @@ def normalise(text: str, lang: str) -> str:
     if lang in ("en", "id"):
         # Lowercase
         text = text.lower()
-        # Remove all characters that are not alphanumeric or space
-        text = re.sub(r"[^a-z0-9 ]", " ", text)
+        # Apostrophes are deleted (not replaced) so "don't" == "dont" regardless of
+        # which side kept the apostrophe.
+        text = text.replace("'", "").replace("\u2019", "")
+        # Every other non-word character (punctuation, hyphens, symbols) becomes a space.
+        # \w is Unicode-aware, so accented letters (e.g. "café") are preserved.
+        text = re.sub(r"[^\w\s]|_", " ", text)
         # Collapse whitespace
         text = re.sub(r"\s+", " ", text).strip()
 
     elif lang == "zh":
-        # Remove CJK punctuation
-        text = "".join(ch for ch in text if ch not in _ZH_PUNCT_SET)
-        # Remove ASCII punctuation
-        text = re.sub(r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~]", "", text)
+        # Latin letters inside Chinese text are case-folded
+        text = text.lower()
+        # Remove every punctuation (Unicode category P*) and symbol (S*) character.
+        # This covers CJK marks (，。、《》「」…), ASCII punctuation and full-width forms.
+        text = "".join(
+            ch for ch in text
+            if ch not in _ZH_PUNCT_SET
+            and not unicodedata.category(ch).startswith(("P", "S"))
+        )
         # Collapse whitespace
         text = re.sub(r"\s+", " ", text).strip()
 
@@ -78,48 +87,47 @@ def normalise(text: str, lang: str) -> str:
     return text
 
 
+def wer_counts(hypothesis: str, reference: str, lang: str) -> tuple[int, int]:
+    """
+    Word-level (edit_distance, reference_length) after normalisation.
+
+    The pair is what you need for corpus-level WER: sum(edits) / sum(ref_len).
+    """
+    hyp_words = normalise(hypothesis, lang).split()
+    ref_words = normalise(reference, lang).split()
+    return edit_distance(hyp_words, ref_words), len(ref_words)
+
+
+def cer_counts(hypothesis: str, reference: str, lang: str = "zh") -> tuple[int, int]:
+    """Character-level (edit_distance, reference_length); spaces are ignored."""
+    hyp_chars = list(normalise(hypothesis, lang).replace(" ", ""))
+    ref_chars = list(normalise(reference, lang).replace(" ", ""))
+    return edit_distance(hyp_chars, ref_chars), len(ref_chars)
+
+
+def _rate(edits: int, ref_len: int, hyp_nonempty: bool) -> float:
+    if ref_len == 0:
+        return 1.0 if hyp_nonempty else 0.0
+    return edits / ref_len
+
+
 def wer(hypothesis: str, reference: str, lang: str) -> float:
     """
-    Word Error Rate for English or Indonesian.
+    Word Error Rate (substitutions + insertions + deletions) / reference words.
 
-    Normalises both strings, splits on whitespace, then computes
-    edit distance at the word level.
-
-    Returns:
-        WER in [0, ∞). Values > 1.0 possible when hypothesis is longer
-        than reference. Returns 0.0 if both are empty.
+    Both strings are normalised first. Values > 1.0 are possible when the
+    hypothesis is much longer than the reference. Empty reference: 0.0 if the
+    hypothesis is also empty, else 1.0.
     """
-    hyp_norm = normalise(hypothesis, lang)
-    ref_norm = normalise(reference, lang)
-
-    hyp_words = hyp_norm.split() if hyp_norm else []
-    ref_words = ref_norm.split() if ref_norm else []
-
-    if not ref_words:
-        return 0.0 if not hyp_words else 1.0
-
-    dist = edit_distance(hyp_words, ref_words)
-    return dist / len(ref_words)
+    edits, n = wer_counts(hypothesis, reference, lang)
+    return _rate(edits, n, bool(normalise(hypothesis, lang)))
 
 
-def cer(hypothesis: str, reference: str) -> float:
+def cer(hypothesis: str, reference: str, lang: str = "zh") -> float:
     """
     Character Error Rate for Mandarin (or any character-level metric).
 
-    Normalises both strings with lang="zh", then computes edit distance
-    at the character level (excluding spaces).
-
-    Returns:
-        CER in [0, ∞). Returns 0.0 if both are empty.
+    Same definition as :func:`wer` but over characters (spaces ignored).
     """
-    hyp_norm = normalise(hypothesis, "zh").replace(" ", "")
-    ref_norm = normalise(reference, "zh").replace(" ", "")
-
-    hyp_chars = list(hyp_norm)
-    ref_chars = list(ref_norm)
-
-    if not ref_chars:
-        return 0.0 if not hyp_chars else 1.0
-
-    dist = edit_distance(hyp_chars, ref_chars)
-    return dist / len(ref_chars)
+    edits, n = cer_counts(hypothesis, reference, lang)
+    return _rate(edits, n, bool(normalise(hypothesis, lang).replace(" ", "")))

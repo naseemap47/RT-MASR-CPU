@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from benchmark.metrics.audio_info import audio_duration_s
 from benchmark.metrics.statistics import summarise
 from benchmark.metrics.system_metrics import SystemSampler
 
@@ -48,8 +49,8 @@ class LatencyRunner:
     Args:
         config_id:    Identifier for this configuration.
         engine:       ASR engine with a `.transcribe(audio_path, **kwargs) -> dict` method.
-                      The returned dict must have a "timing" key containing at minimum
-                      "total_s" and "audio_duration_s".
+                      RTF = wall-clock latency of the call / audio duration read from
+                      the file (falls back to timing["audio_duration_s"] if unreadable).
         audio_files:  List of audio file paths to benchmark.
         n_runs:       Number of measured runs per audio file (warmup excluded).
         warmup_runs:  Number of discarded warm-up runs before measurement starts.
@@ -76,13 +77,17 @@ class LatencyRunner:
         wall_latency = time.perf_counter() - t0
 
         timing = result.get("timing", {})
-        audio_duration_s = timing.get("audio_duration_s", 0.0)
-        rtf = wall_latency / audio_duration_s if audio_duration_s > 0 else 0.0
+        # Prefer the duration read from the file itself so RTF does not depend on
+        # how each engine reports (or mis-reports) its own timing.
+        duration = audio_duration_s(audio_file)
+        if duration is None:
+            duration = timing.get("audio_duration_s", 0.0)
+        rtf = wall_latency / duration if duration > 0 else 0.0
 
         return LatencyResult(
             config_id=self.config_id,
             audio_file=audio_file,
-            audio_duration_s=audio_duration_s,
+            audio_duration_s=duration,
             latency_s=wall_latency,
             rtf=rtf,
             timing_detail=timing,

@@ -23,6 +23,8 @@ def percentile(data: list[float], p: float) -> float:
     """
     if not data:
         raise ValueError("Cannot compute percentile of empty list.")
+    if not 0.0 <= p <= 100.0:
+        raise ValueError(f"Percentile must be in [0, 100], got {p}.")
     sorted_data = sorted(data)
     n = len(sorted_data)
     if n == 1:

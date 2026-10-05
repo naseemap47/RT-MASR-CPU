@@ -27,6 +27,18 @@ def to_serialisable(obj: Any) -> Any:
     return obj
 
 
+def _json_default(obj: Any) -> Any:
+    """Fallback for values json can't encode (numpy scalars/arrays, Paths, ...)."""
+    if hasattr(obj, "item") and callable(obj.item):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    return str(obj)
+
+
 class JsonReporter:
     """
     Saves benchmark results as a timestamped JSON file.
@@ -55,7 +67,8 @@ class JsonReporter:
 
         serialisable = to_serialisable(results)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(serialisable, f, indent=2, ensure_ascii=False)
+            # default=str: never lose a whole run to one non-JSON value (e.g. a numpy float)
+            json.dump(serialisable, f, indent=2, ensure_ascii=False, default=_json_default)
 
         print(f"  [reporter] Raw JSON saved: {path}")
-        return str(path)
+        return str(path.resolve())

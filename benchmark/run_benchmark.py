@@ -5,7 +5,7 @@ ASR CPU Benchmark Pipeline (Qwen3-ASR + Whisper) — CLI Entry Point.
 
 Usage:
     python3 benchmark/run_benchmark.py
-    python3 benchmark/run_benchmark.py --models onnx_int8,whisper_int8_tiny
+    python3 benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_tiny
     python3 benchmark/run_benchmark.py --legs 1,2,4 --runs 5
     python3 benchmark/run_benchmark.py --skip-accuracy --skip-concurrency
     python3 benchmark/run_benchmark.py --output-dir /tmp/bench_results

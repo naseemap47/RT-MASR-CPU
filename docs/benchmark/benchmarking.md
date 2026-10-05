@@ -43,8 +43,9 @@ config is recorded under `failures` and the run continues with the next config;
 | `references_file` | Reference transcripts | `benchmark/data/references.yaml` |
 | `output_dir` | Where reports are written | `benchmark/results` |
 
-Available config ids: `onnx_int8`, `transformers_bf16_0.6b`,
-`transformers_bf16_1.7b`, `whisper_int8_tiny`, `whisper_int8_base`,
+Available config ids: `qwen3_onnx_int8_0.6b`, `qwen3_onnx_fp32_0.6b`, `qwen3_onnx_int4_0.6b`,
+`qwen3_onnx_fp32_1.7b`, `qwen3_onnx_int4_1.7b`, `qwen3_transformers_bf16_0.6b`,
+`qwen3_transformers_bf16_1.7b`, `whisper_int8_tiny`, `whisper_int8_base`,
 `whisper_int8_small`, `whisper_int8_medium`.
 
 Missing audio files are skipped with a warning. All relative paths are resolved
@@ -59,13 +60,13 @@ from the project root, so the script can be launched from anywhere.
 uv run python benchmark/run_benchmark.py
 
 # Quick smoke run: ONNX only, 1 measured run, legs 1 and 2, no accuracy
-uv run python benchmark/run_benchmark.py --models onnx_int8 --runs 1 --legs 1,2 --skip-accuracy
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b --runs 1 --legs 1,2 --skip-accuracy
 
 # Qwen3 ONNX INT8 vs Transformers 0.6B
-uv run python benchmark/run_benchmark.py --models onnx_int8,transformers_bf16_0.6b --runs 3
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,qwen3_transformers_bf16_0.6b --runs 3
 
 # Qwen3 ONNX vs Whisper small, latency + accuracy only
-uv run python benchmark/run_benchmark.py --models onnx_int8,whisper_int8_small --skip-concurrency
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_small --skip-concurrency
 ```
 
 | Flag | Effect |

@@ -309,16 +309,18 @@ The model loads at startup (a few seconds for ONNX). `GET /api/health` reports
 uv run python benchmark/run_benchmark.py
 
 # Fast run: ONNX only, no accuracy, 1 run
-uv run python benchmark/run_benchmark.py --models onnx_int8 --runs 1 --legs 1,2 --skip-accuracy
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b --runs 1 --legs 1,2 --skip-accuracy
 
 # ONNX vs Transformers 0.6B
-uv run python benchmark/run_benchmark.py --models onnx_int8,transformers_bf16_0.6b --runs 3
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,qwen3_transformers_bf16_0.6b --runs 3
 
 # Qwen3 ONNX vs Whisper INT8 small
-uv run python benchmark/run_benchmark.py --models onnx_int8,whisper_int8_small
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_small
 ```
 
-Config ids: `onnx_int8`, `transformers_bf16_0.6b`, `transformers_bf16_1.7b`,
+Config ids: `qwen3_onnx_int8_0.6b`, `qwen3_onnx_fp32_0.6b`, `qwen3_onnx_int4_0.6b`, `qwen3_onnx_fp32_1.7b`,
+`qwen3_onnx_int4_1.7b` (the last four need their models downloaded first),
+`qwen3_transformers_bf16_0.6b`, `qwen3_transformers_bf16_1.7b`,
 `whisper_int8_tiny`, `whisper_int8_base`, `whisper_int8_small`,
 `whisper_int8_medium`. Reports are written to
 `benchmark/results/<UTC timestamp>_raw.json` and `_summary.md`. See

@@ -18,7 +18,7 @@ models:
     config: "config/models/qwen3_onnx.yaml"
     backend: "onnx"
     engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
-    model_dir: "models/qwen3-asr-onnx"
+    model_dir: "models/qwen3-asr-onnx-0.6b-int8"
     hf_repo: "Daumee/Qwen3-ASR-0.6B-ONNX-CPU"
     description: >
       Pure ONNX Runtime inference — no PyTorch required.

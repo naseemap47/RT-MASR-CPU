@@ -4,10 +4,10 @@
 # Qwen3-ASR-0.6B-ONNX  —  Pure ONNX Runtime backend (no PyTorch)
 #   Engine  : ONNXQwen3ASR  (src/engines/qwen3_onnx_engine.py)
 #   HF repo : Daumee/Qwen3-ASR-0.6B-ONNX-CPU
-#   Local   : models/qwen3-asr-onnx
+#   Local   : models/qwen3-asr-onnx-0.6b-int8
 #   Download: DownloadModels().qwen3_0_6b_asr_onnx_model(
 #               repo_id="Daumee/Qwen3-ASR-0.6B-ONNX-CPU",
-#               target_dir="models/qwen3-asr-onnx")
+#               target_dir="models/qwen3-asr-onnx-0.6b-int8")
 #
 #   vs Transformers backends: faster on CPU, no PyTorch dependency,
 #   true token-streaming (character-by-character deltas), supports INT8 decoder.
@@ -19,7 +19,7 @@ backend: "onnx"                  # → loads src/engines/qwen3_onnx_engine.py ::
 
 download:
   repo_id: "Daumee/Qwen3-ASR-0.6B-ONNX-CPU"
-  target_dir: "models/qwen3-asr-onnx"
+  target_dir: "models/qwen3-asr-onnx-0.6b-int8"
   method: "onnx"                 # uses DownloadModels.qwen3_0_6b_asr_onnx_model()
   required_files:
     - "decoder_init.int8.onnx"
@@ -32,7 +32,7 @@ download:
     - "tokenizer.json"
 
 engine:
-  onnx_dir: "models/qwen3-asr-onnx"
+  onnx_dir: "models/qwen3-asr-onnx-0.6b-int8"
   num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
   quantize: "int8"               # "int8" | "fp32"  (int8 decoder is smaller and faster)
   language: null                 # null = auto-detect; "English" | "Chinese" | "Indonesian"  (aliases en / zh / mandarin / id also work)

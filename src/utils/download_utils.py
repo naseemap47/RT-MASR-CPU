@@ -308,7 +308,7 @@ class DownloadModels:
     def qwen3_0_6b_asr_onnx_model(
         self,
         repo_id: str = "Daumee/Qwen3-ASR-0.6B-ONNX-CPU",
-        target_dir: str = "models/qwen3-asr-onnx",
+        target_dir: str = "models/qwen3-asr-onnx-0.6b-int8",
         force: bool = False,
     ) -> Path:
         """Backward-compatible wrapper → :meth:`download_onnx`."""

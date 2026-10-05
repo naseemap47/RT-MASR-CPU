@@ -118,7 +118,7 @@ class OnnxAsrPipeline:
 
     def __init__(
         self,
-        onnx_dir: str = "models/qwen3-asr-onnx",
+        onnx_dir: str = "models/qwen3-asr-onnx-0.6b-int8",
         num_threads: int = 0,
         quantize: str = "int8",
         ort_session: dict | None = None,
@@ -544,7 +544,7 @@ class ONNXQwen3ASR:
 
     def __init__(
         self,
-        onnx_dir: str = "models/qwen3-asr-onnx",
+        onnx_dir: str = "models/qwen3-asr-onnx-0.6b-int8",
         num_threads: int = 0,
         quantize: Literal["int8", "fp32"] = "int8",
         language: Optional[str] = None,
@@ -584,7 +584,7 @@ class ONNXQwen3ASR:
         ort_cfg      = cfg.get("ort_session", {})
 
         return cls(
-            onnx_dir       = engine_cfg.get("onnx_dir",     "models/qwen3-asr-onnx"),
+            onnx_dir       = engine_cfg.get("onnx_dir",     "models/qwen3-asr-onnx-0.6b-int8"),
             num_threads    = engine_cfg.get("num_threads",  0),
             quantize       = engine_cfg.get("quantize",     "int8"),
             language       = engine_cfg.get("language",     None),
@@ -653,7 +653,7 @@ class ONNXQwen3ASR:
 #     parser = argparse.ArgumentParser(description="Qwen3-ASR Pure ONNX Inference")
 #     parser.add_argument("audio", nargs="+", help="Audio file(s)")
 #     parser.add_argument("--language", type=str, default=None)
-#     parser.add_argument("--onnx-dir", type=str, default="models/qwen3-asr-onnx")
+#     parser.add_argument("--onnx-dir", type=str, default="models/qwen3-asr-onnx-0.6b-int8")
 #     parser.add_argument("--max-new-tokens", type=int, default=512)
 #     parser.add_argument("--quantize", type=str, default="int8", choices=["none", "int8"],
 #                         help="Decoder quantization: none (FP32) or int8 (default)")

@@ -63,7 +63,6 @@ def load_server_config(config_path: str = "config/config.yaml") -> dict[str, Any
             "server":         { "host": ..., "port": ..., "log_level": ... },
             "default_model":  "qwen3_onnx",
             "model_registry": "config/models/models.yaml",
-            "default_pipeline": "streaming_pcm",
         }
     """
     return load_config(config_path)

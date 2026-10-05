@@ -34,5 +34,3 @@ default_model: "whisper_int8_tiny"
 
 # Registry file that lists all available model variants.
 model_registry: "config/models/models.yaml"
-
-default_pipeline: "streaming_pcm"

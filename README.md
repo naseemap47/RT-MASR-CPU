@@ -36,7 +36,7 @@ flowchart LR
     subgraph Engines["src/engines/"]
         E1["ONNXQwen3ASR<br/>Qwen3-ASR-0.6B ONNX INT8"]
         E2["Qwen3ASR<br/>Transformers 0.6B / 1.7B"]
-        E3["WhisperOnnxEngine<br/>(benchmark only)"]
+        E3["WhisperOnnxEngine<br/>+ sliding-window streamer"]
     end
 
     BM["benchmark/run_benchmark.py"]
@@ -227,7 +227,13 @@ in the UI; the browser resamples it to 16 kHz mono before streaming.
 Pick the model served by the live UI in `config/config.yaml`:
 
 ```yaml
-default_model: "qwen3_onnx"    # or "qwen3_0.6b", "qwen3_1.7b"
+default_model: "qwen3_onnx"    # or "qwen3_0.6b", "qwen3_1.7b", "whisper_int8_tiny", ...
+```
+
+or override it for one run without editing the file:
+
+```bash
+RT_MASR_MODEL=whisper_int8_tiny uv run uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 The name is resolved through `config/models/models.yaml` to a per-model YAML
@@ -237,8 +243,11 @@ The name is resolved through `config/models/models.yaml` to a per-model YAML
 - The repo currently ships with `default_model: "qwen3_1.7b"`. In our benchmark
   that model ran slower than real time on an 8-core CPU (RTF ≈ 1.0–1.5), so use
   `qwen3_onnx` for a smooth live demo.
-- `whisper_*` entries can be benchmarked but **cannot** be served by the live
-  UI yet (`main.py` only builds `onnx` and `transformers` engines).
+- `whisper_*` entries are served with **sliding-window streaming**: the window
+  is re-transcribed every `hop_s`, text confirmed by two consecutive passes
+  (LocalAgreement-2) is shown as final and the rest as dimmed tentative text. Tune
+  it in the `streaming:` block of `config/models/whisper_*.yaml`. Start with
+  `whisper_int8_tiny`; `small`/`medium` are slower than real time on CPU.
 - The `server:` block (host/port) is not read by `main.py`; pass host/port to
   uvicorn instead.
 
@@ -318,11 +327,10 @@ uv run pytest                                   # all of tests/ (needs models + 
 
 ## Known limitations
 
-- Whisper is benchmark-only; the live server cannot serve it yet.
+- Whisper live streaming re-encodes a 30 s-padded window every hop, so only tiny (and
+  probably base) keep up with real time; larger models lag.
 - `ttft_ms` is stamped when the first text-producing inference pass returns, so
   it measures that whole pass, not the first decoded token.
-- When an utterance is committed, the server briefly shows that sentence twice
-  in `full_text` until the next interim pass.
 - The Transformers backend returns each pass's text in one piece (no token
   streaming); Whisper yields per segment.
 - The energy gate is a fixed RMS threshold calibrated on the test audio, not a

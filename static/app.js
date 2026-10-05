@@ -30,6 +30,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const modelStatusText        = document.getElementById("model-status-text");
   const transcriptBox          = document.getElementById("transcript-box");
   const transcriptMeta         = document.getElementById("transcript-meta");
+  const titleDesc              = document.getElementById("title-desc");
+  const streamModeLabel        = document.getElementById("stream-mode-label");
 
   /* State pill */
   const streamStatePill = document.getElementById("stream-state-pill");
@@ -93,11 +95,48 @@ document.addEventListener("DOMContentLoaded", () => {
     streamStatePill.className = `stream-state-pill ${cfg.cls}`;
   }
 
+  /* ── Active model / stream mode ───────────────────────── */
+  const STREAM_MODE_LABEL = {
+    sliding_window: "sliding window",
+    vad_utterance:  "VAD utterances",
+  };
+
+  function showActiveModel(data) {
+    if (titleDesc && data.active_model && data.active_model !== "(not loaded)") {
+      titleDesc.textContent = `${data.active_model} · ${data.backend} · CPU Inference`;
+    }
+    if (streamModeLabel && data.stream_mode) {
+      streamModeLabel.textContent = STREAM_MODE_LABEL[data.stream_mode] || data.stream_mode;
+    }
+  }
+
+  /* Confirmed text in the normal colour, tentative (may still change) dimmed. */
+  function renderTranscript(committed, tentative) {
+    transcriptBox.textContent = "";
+    if (committed) {
+      const c = document.createElement("span");
+      c.className = "committed";
+      c.textContent = committed;
+      transcriptBox.appendChild(c);
+    }
+    if (tentative) {
+      const t = document.createElement("span");
+      t.className = "tentative";
+      /* CJK text is written without spaces; everything else needs one. */
+      const wide = /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+      const needSpace = committed && !wide.test(committed.slice(-1)) && !wide.test(tentative[0]);
+      t.textContent = (needSpace ? " " : "") + tentative;
+      transcriptBox.appendChild(t);
+    }
+    transcriptBox.scrollTop = transcriptBox.scrollHeight;
+  }
+
   /* ── Health polling ───────────────────────────────────── */
   function checkHealth() {
     fetch("/api/health")
       .then(r => r.json())
       .then(data => {
+        showActiveModel(data);
         if (data.model_ready) {
           modelStatusText.textContent = "MODEL: READY";
           modelStatusText.style.background = "rgba(16,185,129,0.2)";
@@ -250,7 +289,8 @@ document.addEventListener("DOMContentLoaded", () => {
       transcriptMeta.textContent =
         `audio: ${m.audio_duration_s.toFixed(2)}s · ` +
         `infer: ${(m.infer_latency_ms/1000).toFixed(2)}s · ` +
-        (m.inference_passes != null ? `pass #${m.inference_passes}` : "");
+        (m.inference_passes != null ? `pass #${m.inference_passes}` : "") +
+        (m.window_start_s != null ? ` · window ${m.window_start_s.toFixed(1)}s→${(m.window_start_s + m.window_s).toFixed(1)}s` : "");
     }
   }
 
@@ -315,6 +355,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = JSON.parse(event.data);
 
       if (data.type === "call_ready") {
+        if (streamModeLabel && data.stream_mode) {
+          streamModeLabel.textContent = STREAM_MODE_LABEL[data.stream_mode] || data.stream_mode;
+        }
         setState("buffering");
         transcriptBox.innerHTML = "<span class='placeholder'>Call active — streaming audio chunks…</span>";
         timerInterval = setInterval(updateCallTimer, 1000);
@@ -326,12 +369,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
       } else if (data.type === "transcript_delta") {
         if (currentState !== "transcribing") setState("transcribing");
-        transcriptBox.textContent = data.full_text || "";
+        if (data.committed_text !== undefined) {
+          renderTranscript(data.committed_text, data.tentative_text || "");
+        } else {
+          transcriptBox.textContent = data.full_text || "";
+        }
         applyMetrics(data.metrics);
 
       } else if (data.type === "call_ended") {
         setState("completed");
-        transcriptBox.textContent = data.final_text || "Call completed.";
+        if (data.final_text) renderTranscript(data.final_text, "");
+        else transcriptBox.textContent = "Call completed.";
         if (data.metrics) applyMetrics(data.metrics);
         _teardown();
       }

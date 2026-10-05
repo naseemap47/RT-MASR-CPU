@@ -33,6 +33,7 @@ def transcribe(
     logprob_threshold: Optional[float] = -1.0,
     no_speech_threshold: Optional[float] = 0.6,
     condition_on_previous_text: bool = True,
+    mel: Optional[np.ndarray] = None,
     **decode_options,
 ):
     """
@@ -69,6 +70,10 @@ def transcribe(
         disabling may make the text inconsistent across windows, but the model becomes less prone to
         getting stuck in a failure loop, such as repetition looping or timestamps going out of sync.
 
+    mel: np.ndarray, optional
+        Pre-computed log-Mel spectrogram of `audio` (shape [n_mels, n_frames]).
+        If None it is computed here. (RT-MASR addition: lets the caller time it.)
+
     decode_options: dict
         Keyword arguments to construct `DecodingOptions` instances
 
@@ -77,7 +82,8 @@ def transcribe(
     A dictionary containing the resulting text ("text") and segment-level details ("segments"), and
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
-    mel: np.ndarray = log_mel_spectrogram(audio)
+    if mel is None:
+        mel = log_mel_spectrogram(audio)
 
     if decode_options.get("language", None) is None:
         if verbose:

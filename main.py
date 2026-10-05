@@ -20,7 +20,18 @@ The active inference backend is chosen by ``default_model`` in config/config.yam
   "qwen3_onnx"   → ONNXQwen3ASR   (src/engines/qwen3_onnx_engine.py)
   "qwen3_0.6b"   → Qwen3ASR 0.6B  (src/engines/qwen3_engine.py)
   "qwen3_1.7b"   → Qwen3ASR 1.7B  (src/engines/qwen3_engine.py)
-Change the YAML key to switch backends without touching this file.
+  "whisper_*"    → WhisperOnnxEngine (src/engines/whisper_engine.py)
+Change the YAML key (or set the RT_MASR_MODEL environment variable) to switch
+backends without touching this file.
+
+Streaming strategy per backend
+------------------------------
+Qwen3 (onnx / transformers)  VAD-utterance mode: the open utterance is re-transcribed
+                             and committed at a silence boundary (find_vad_boundary).
+Whisper                      Sliding-window mode (src/engines/whisper_streaming.py):
+                             the window is re-transcribed every hop, text confirmed by
+                             LocalAgreement-2 is committed, the rest is tentative, and
+                             the window slides forward so cost stays bounded.
 """
 
 import asyncio
@@ -37,17 +48,28 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from src.core.config import resolve_model_config, load_server_config
 from src.engines.live_call_session import LiveCallSession
+from src.engines.whisper_streaming import StreamingConfig, WhisperSlidingWindowStreamer
 
 # ── Config paths ──────────────────────────────────────────────────────────────
 CONFIG_PATH = "config/config.yaml"
 
 # ── Type alias for either engine ──────────────────────────────────────────────
-ASREngine = Union["ONNXQwen3ASR", "Qwen3ASR"]  # noqa: F821  (resolved at runtime)
+ASREngine = Union["ONNXQwen3ASR", "Qwen3ASR", "WhisperOnnxEngine"]  # noqa: F821  (resolved at runtime)
 
 _engine: Optional[ASREngine] = None
 _model_ready: bool = False
 _active_model_name: str = "(not loaded)"
 _active_backend: str = "(unknown)"
+_streaming_cfg: StreamingConfig = StreamingConfig()
+
+
+def _model_name_override() -> Optional[str]:
+    """Optional model override: RT_MASR_MODEL=whisper_int8_tiny uvicorn main:app"""
+    return os.environ.get("RT_MASR_MODEL") or None
+
+
+def _stream_mode() -> str:
+    return "sliding_window" if _active_backend == "whisper" else "vad_utterance"
 
 
 def _build_engine(model_cfg: dict) -> ASREngine:
@@ -59,7 +81,7 @@ def _build_engine(model_cfg: dict) -> ASREngine:
         model_cfg: Per-model config dict (from resolve_model_config).
 
     Returns:
-        A fully constructed engine instance (ONNXQwen3ASR or Qwen3ASR).
+        A fully constructed engine instance (ONNXQwen3ASR, Qwen3ASR or WhisperOnnxEngine).
 
     Raises:
         ValueError: If the backend discriminator is unknown.
@@ -74,33 +96,44 @@ def _build_engine(model_cfg: dict) -> ASREngine:
         from src.engines.qwen3_engine import Qwen3ASR
         return Qwen3ASR.from_config(model_cfg)
 
+    elif backend == "whisper":
+        from src.engines.whisper_engine import WhisperOnnxEngine
+        return WhisperOnnxEngine.from_config(model_cfg)
+
     else:
         raise ValueError(
             f"Unknown backend '{backend}' in model config. "
-            "Expected 'onnx' or 'transformers'."
+            "Expected 'onnx', 'transformers' or 'whisper'."
         )
+
+
+def _load_active_model() -> ASREngine:
+    """Resolve the active model config, record its metadata and build the engine."""
+    global _engine, _active_model_name, _active_backend, _streaming_cfg
+
+    model_cfg = resolve_model_config(CONFIG_PATH, model_name=_model_name_override())
+    _active_model_name = model_cfg.get("display_name", model_cfg.get("name", "?"))
+    _active_backend    = model_cfg.get("backend", "?")
+    _streaming_cfg     = StreamingConfig.from_dict(model_cfg.get("streaming"))
+
+    print(f"Loading ASR engine: {_active_model_name} (backend={_active_backend}) ...")
+    _engine = _build_engine(model_cfg)
+    return _engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _engine, _model_ready, _active_model_name, _active_backend
+    global _model_ready
 
-    model_cfg = resolve_model_config(CONFIG_PATH)
-    _active_model_name = model_cfg.get("display_name", model_cfg.get("name", "?"))
-    _active_backend    = model_cfg.get("backend", "?")
-
-    print(f"Loading ASR engine: {_active_model_name} (backend={_active_backend}) ...")
-    _engine = _build_engine(model_cfg)
+    _load_active_model()
     _model_ready = True
-    print(f"Engine ready: {_active_model_name}")
+    print(f"Engine ready: {_active_model_name} (stream mode: {_stream_mode()})")
     yield
 
 
 def get_engine() -> ASREngine:
-    global _engine
     if _engine is None:
-        model_cfg = resolve_model_config(CONFIG_PATH)
-        _engine = _build_engine(model_cfg)
+        _load_active_model()
     return _engine
 
 app = FastAPI(title="RT-MASR Live Voice-Call Simulation", lifespan=lifespan)
@@ -127,6 +160,7 @@ def check_health():
         "model_ready": _model_ready,
         "active_model": _active_model_name,
         "backend": _active_backend,
+        "stream_mode": _stream_mode(),
         "cpu_percent": proc.cpu_percent(interval=None),
         "rss_mb": round(mem_info.rss / 1_048_576, 1),
         "vms_mb": round(mem_info.vms / 1_048_576, 1),
@@ -204,110 +238,237 @@ async def _run_inference(
     return await loop.run_in_executor(None, _collect)
 
 
+class _CallState:
+    """Mutable per-connection state shared by the handler helpers."""
+    def __init__(self) -> None:
+        self.cumulative_text: str = ""
+        self.language: Optional[str] = None     # as sent by the UI ("" = auto-detect)
+
+
+async def _ws_reader(websocket: WebSocket, incoming: "asyncio.Queue[dict]") -> None:
+    """Pump raw WebSocket messages into a queue so the handler can look ahead."""
+    try:
+        while True:
+            message = await websocket.receive()
+            await incoming.put(message)
+            if message.get("type") == "websocket.disconnect":
+                return
+    except (WebSocketDisconnect, RuntimeError):
+        await incoming.put({"type": "websocket.disconnect"})
+
+
+def _drain_audio(session: LiveCallSession, incoming: "asyncio.Queue[dict]") -> Optional[dict]:
+    """
+    Move every already-queued audio frame into the session without inferring.
+
+    Returns the first non-audio message (control / disconnect), which the caller
+    must handle next, or None if the queue ran dry. Skipping ahead like this
+    keeps the stream live when a Whisper pass takes longer than the audio it
+    covers, instead of building an ever-growing backlog.
+    """
+    while True:
+        try:
+            message = incoming.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+        if message.get("bytes"):
+            session.process_pcm_bytes(message["bytes"])
+        else:
+            return message
+
+
+async def _handle_audio_vad(
+    websocket: WebSocket, session: LiveCallSession, state: _CallState, pcm_data: bytes,
+) -> None:
+    """Qwen path: energy-gated, VAD-committed utterances (unchanged behaviour)."""
+    stats = session.process_pcm_bytes(pcm_data)
+
+    await websocket.send_json({
+        "type": "chunk_ack",
+        "buffered_seconds": stats["buffered_seconds"],
+        "chunks_received": stats["chunks_received"],
+        "total_bytes": stats["total_bytes"],
+    })
+
+    # ── VAD-driven inference trigger ───────────────────────────────────────
+    if not (
+        len(session.audio_buffer) >= 8000
+        and stats["chunks_received"] % 2 == 0
+        and session.has_speech()        # skip silent/noise-only chunks
+    ):
+        return
+
+    engine = get_engine()
+    boundary = session.find_vad_boundary()
+
+    if boundary is not None:
+        # ── Commit path: utterance boundary detected ───────────────────────
+        # Transcribe only the completed utterance, then discard those samples
+        # — inference time stays bounded.
+        t_infer_start = session.mark_infer_start()
+        first_token_noted = session.first_token_time is not None
+        utterance_audio = session.pop_utterance(boundary)
+
+        deltas, stage_timing = await _run_inference(engine, utterance_audio, state.language)
+
+        if deltas and not first_token_noted:
+            session.mark_first_token()  # T3
+        infer_duration_s = time.time() - t_infer_start
+
+        session.append_committed("".join(deltas))
+        deltas = []     # now part of committed_text; it must not be shown again as interim
+
+    else:
+        # ── Interim path: open utterance, show partial result ──────────────
+        # Re-transcribe only the current (bounded) window.
+        t_infer_start = session.mark_infer_start()
+        first_token_noted = session.first_token_time is not None
+
+        deltas, stage_timing = await _run_inference(engine, session.audio_buffer, state.language)
+
+        if deltas and not first_token_noted:
+            session.mark_first_token()  # T3
+        infer_duration_s = time.time() - t_infer_start
+
+    # ── Build display text: committed + open-window interim ────────────────
+    interim = "".join(deltas) if deltas else ""
+    new_text = (
+        session.committed_text
+        + (" " if session.committed_text and interim else "")
+        + interim
+    ).strip()
+
+    if new_text != state.cumulative_text:
+        state.cumulative_text = new_text
+        metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
+        metrics["stream_mode"] = "vad_utterance"
+        await websocket.send_json({
+            "type": "transcript_delta",
+            "full_text": state.cumulative_text,
+            "committed_text": session.committed_text,
+            "tentative_text": interim,
+            "metrics": metrics,
+        })
+
+
+def _sliding_metrics(session: LiveCallSession, update, infer_s: float) -> dict:
+    """Telemetry for a sliding-window pass (RTF is measured against the window it covered)."""
+    metrics = session.get_metrics(infer_s, stage_timing=update.timing or None)
+    metrics["audio_duration_s"] = round(update.window_s, 3)
+    metrics["rtf"] = round(infer_s / update.window_s, 4) if update.window_s > 0 else 0.0
+    metrics["stream_mode"] = "sliding_window"
+    metrics["window_s"] = round(update.window_s, 2)
+    metrics["window_start_s"] = round(update.window_start_s, 2)
+    metrics["language"] = update.language
+    return metrics
+
+
+async def _handle_audio_sliding(
+    websocket: WebSocket,
+    session: LiveCallSession,
+    streamer: WhisperSlidingWindowStreamer,
+    state: _CallState,
+    pcm_data: bytes,
+    incoming: "asyncio.Queue[dict]",
+) -> Optional[dict]:
+    """
+    Whisper path: sliding window + LocalAgreement (see whisper_streaming.py).
+
+    Returns a look-ahead control message that must be processed next, if any.
+    """
+    stats = session.process_pcm_bytes(pcm_data)
+    await websocket.send_json({
+        "type": "chunk_ack",
+        "buffered_seconds": stats["buffered_seconds"],
+        "chunks_received": stats["chunks_received"],
+        "total_bytes": stats["total_bytes"],
+    })
+
+    if not streamer.ready():
+        return None
+
+    carry = _drain_audio(session, incoming)         # skip any backlog
+
+    t_infer_start = session.mark_infer_start()
+    try:
+        update = await asyncio.get_running_loop().run_in_executor(None, streamer.step)
+    except Exception as exc:                        # keep the call alive on a bad pass
+        import traceback
+        traceback.print_exc()
+        print(f"[sliding-window] pass failed: {exc}")
+        return carry
+    infer_duration_s = time.time() - t_infer_start
+
+    if update is None:
+        return carry                                # silence, nothing to do
+    if update.full_text and session.first_token_time is None:
+        session.mark_first_token()                  # T3
+
+    if update.changed:
+        state.cumulative_text = update.full_text
+        await websocket.send_json({
+            "type": "transcript_delta",
+            "full_text": update.full_text,
+            "committed_text": update.committed_text,
+            "tentative_text": update.tentative_text,
+            "metrics": _sliding_metrics(session, update, infer_duration_s),
+        })
+    return carry
+
+
 @app.websocket("/ws/call-stream")
 async def websocket_call_stream(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_json({
         "type": "connected",
         "model_ready": _model_ready,
+        "stream_mode": _stream_mode(),
+        "active_model": _active_model_name,
         "message": "Connected to RT-MASR Live Call Stream"
     })
 
     session = LiveCallSession()
-    cumulative_text = ""
-    call_language: Optional[str] = None
+    state = _CallState()
+    sliding = _active_backend == "whisper" and _engine is not None
+    streamer = (
+        WhisperSlidingWindowStreamer(_engine, session, _streaming_cfg) if sliding else None
+    )
+
+    incoming: asyncio.Queue = asyncio.Queue()
+    reader = asyncio.create_task(_ws_reader(websocket, incoming))
+    carry: Optional[dict] = None
 
     try:
         while True:
-            try:
-                message = await websocket.receive()
-            except WebSocketDisconnect:
-                break
+            message = carry if carry is not None else await incoming.get()
+            carry = None
 
             if message.get("type") == "websocket.disconnect":
                 break
 
             if "bytes" in message and message["bytes"]:
-                pcm_data = message["bytes"]
-                stats = session.process_pcm_bytes(pcm_data)
-
-                await websocket.send_json({
-                    "type": "chunk_ack",
-                    "buffered_seconds": stats["buffered_seconds"],
-                    "chunks_received": stats["chunks_received"],
-                    "total_bytes": stats["total_bytes"],
-                })
-
-                # ── VAD-driven inference trigger ───────────────────────────
-                if (
-                    len(session.audio_buffer) >= 8000
-                    and stats["chunks_received"] % 2 == 0
-                    and session.has_speech()        # skip silent/noise-only chunks
-                ):
-                    engine = get_engine()
-                    boundary = session.find_vad_boundary()
-
-                    if boundary is not None:
-                        # ── Commit path: utterance boundary detected ────────
-                        # Transcribe only the completed utterance, then discard
-                        # those samples — inference time stays bounded.
-                        t_infer_start = session.mark_infer_start()
-                        first_token_noted = session.first_token_time is not None
-                        utterance_audio = session.pop_utterance(boundary)
-
-                        deltas, stage_timing = await _run_inference(
-                            engine, utterance_audio, call_language
-                        )
-
-                        if deltas and not first_token_noted:
-                            session.mark_first_token()  # T3
-                        infer_duration_s = time.time() - t_infer_start
-
-                        session.append_committed("".join(deltas))
-
-                    else:
-                        # ── Interim path: open utterance, show partial result ─
-                        # Re-transcribe only the current (bounded) window.
-                        t_infer_start = session.mark_infer_start()
-                        first_token_noted = session.first_token_time is not None
-
-                        deltas, stage_timing = await _run_inference(
-                            engine, session.audio_buffer, call_language
-                        )
-
-                        if deltas and not first_token_noted:
-                            session.mark_first_token()  # T3
-                        infer_duration_s = time.time() - t_infer_start
-
-                    # ── Build display text: committed + open-window interim ──
-                    interim = "".join(deltas) if deltas else ""
-                    new_text = (
-                        session.committed_text
-                        + (" " if session.committed_text and interim else "")
-                        + interim
-                    ).strip()
-
-                    if new_text != cumulative_text:
-                        cumulative_text = new_text
-                        metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
-                        await websocket.send_json({
-                            "type": "transcript_delta",
-                            "full_text": cumulative_text,
-                            "metrics": metrics,
-                        })
+                if streamer is not None:
+                    carry = await _handle_audio_sliding(
+                        websocket, session, streamer, state, message["bytes"], incoming
+                    )
+                else:
+                    await _handle_audio_vad(websocket, session, state, message["bytes"])
 
             elif "text" in message and message["text"]:
                 data = json.loads(message["text"])
                 msg_type = data.get("type")
 
                 if msg_type == "start_call":
-                    call_language = data.get("language")
+                    state.language = data.get("language")
                     # ── T0: call-start ─────────────────────────────────
                     session.mark_call_start()
-                    cumulative_text = ""
+                    state.cumulative_text = ""
+                    if streamer is not None:
+                        streamer.reset(language=state.language or None)
                     await websocket.send_json({
                         "type": "call_ready",
-                        "message": f"Model ready (Language: {call_language or 'Auto-Detect'}). Call leg starting.",
+                        "stream_mode": _stream_mode(),
+                        "message": f"Model ready (Language: {state.language or 'Auto-Detect'}). Call leg starting.",
                     })
 
                 elif msg_type == "end_call":
@@ -315,39 +476,62 @@ async def websocket_call_stream(websocket: WebSocket):
                     stage_timing = None
                     infer_duration_s = 0.0
 
-                    # Flush any remaining audio in the open-utterance buffer
-                    if len(session.audio_buffer) > 0:
-                        engine = get_engine()
+                    if streamer is not None:
+                        # Finalise the window: transcribe what is left, commit everything.
                         t_infer_start = session.mark_infer_start()
-                        first_token_noted = session.first_token_time is not None
-
-                        deltas, stage_timing = await _run_inference(
-                            engine, session.audio_buffer, call_language
+                        update = await asyncio.get_running_loop().run_in_executor(
+                            None, streamer.finish
                         )
-
-                        if deltas and not first_token_noted:
-                            session.mark_first_token()
                         infer_duration_s = time.time() - t_infer_start
+                        if update is not None and update.full_text and session.first_token_time is None:
+                            session.mark_first_token()
+                        metrics = (
+                            _sliding_metrics(session, update, infer_duration_s)
+                            if update is not None and update.window_s > 0
+                            else session.get_metrics(0.0)
+                        )
+                        metrics["stream_mode"] = "sliding_window"
+                        state.cumulative_text = streamer.full_text
+                        final_text = streamer.committed_text
+                    else:
+                        # Flush any remaining audio in the open-utterance buffer
+                        if len(session.audio_buffer) > 0:
+                            engine = get_engine()
+                            t_infer_start = session.mark_infer_start()
+                            first_token_noted = session.first_token_time is not None
 
-                        # Commit trailing audio; clear the buffer
-                        trailing = "".join(deltas).strip()
-                        if trailing:
-                            session.append_committed(trailing)
-                        session.audio_buffer = session.audio_buffer[:0]
+                            deltas, stage_timing = await _run_inference(
+                                engine, session.audio_buffer, state.language
+                            )
 
-                    cumulative_text = session.committed_text
-                    metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
+                            if deltas and not first_token_noted:
+                                session.mark_first_token()
+                            infer_duration_s = time.time() - t_infer_start
+
+                            # Commit trailing audio; clear the buffer
+                            trailing = "".join(deltas).strip()
+                            if trailing:
+                                session.append_committed(trailing)
+                            session.audio_buffer = session.audio_buffer[:0]
+
+                        state.cumulative_text = session.committed_text
+                        final_text = state.cumulative_text
+                        metrics = session.get_metrics(infer_duration_s, stage_timing=stage_timing)
+                        metrics["stream_mode"] = "vad_utterance"
+
                     metrics["total_call_time_s"] = round(total_call_time, 2)
 
                     await websocket.send_json({
                         "type": "call_ended",
-                        "final_text": cumulative_text,
+                        "final_text": final_text,
                         "metrics": metrics,
                     })
                     break
 
     except WebSocketDisconnect:
         pass
+    finally:
+        reader.cancel()
 
 if __name__ == "__main__":
     import uvicorn

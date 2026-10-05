@@ -30,7 +30,8 @@ flowchart LR
     subgraph Engines["ASR engines — src/engines/"]
         ONNX["ONNXQwen3ASR<br/>qwen3_onnx_engine.py"]
         HF["Qwen3ASR (Transformers)<br/>qwen3_engine.py"]
-        WH["WhisperOnnxEngine<br/>whisper_engine.py<br/>(benchmark only)"]
+        WH["WhisperOnnxEngine<br/>whisper_engine.py"]
+        SW["WhisperSlidingWindowStreamer<br/>whisper_streaming.py<br/>(sliding window + LocalAgreement-2)"]
     end
 
     CFG["config/config.yaml → models.yaml → per-model YAML"]
@@ -146,8 +147,36 @@ The `streaming:` block in the per-model YAMLs (`min_buffer_samples`,
   is bounded by the 15 s window, not by call length.
 - **Interim text** is the transcription of the open (uncommitted) buffer and is
   replaced on every pass.
-- The server sends `full_text = committed_text + " " + interim`. The UI does not
-  currently render the two parts differently.
+- The server sends `committed_text`, `tentative_text` (the interim part) and
+  `full_text` (both joined). The UI renders confirmed text normally and tentative
+  text dimmed/italic.
+
+### 2.3.1 Whisper: sliding-window streaming
+
+Whisper cannot emit tokens as audio arrives, so when the active model has
+`backend: whisper` the handler uses `WhisperSlidingWindowStreamer`
+(`src/engines/whisper_streaming.py`) instead of the VAD-utterance path above.
+`/api/health` and every WebSocket message report `stream_mode`
+(`sliding_window` or `vad_utterance`).
+
+1. Audio accumulates in `session.audio_buffer`, which *is* the window.
+2. Every `hop_s` (1 s) of new audio the whole window is re-transcribed.
+3. **LocalAgreement-2:** the longest common prefix of the current and previous
+   hypothesis (compared case/punctuation-insensitively; per character for CJK) is
+   committed and never changes. The rest is `tentative_text`.
+4. **Sliding:** when the window exceeds `max_window_s` (12 s) it is cut forward to
+   the end of the last fully committed Whisper segment, so pass cost stays bounded.
+   At `hard_max_window_s` (20 s) the hypothesis is force-committed and the window cut.
+5. **Silence flush:** speech followed by `silence_flush_s` (0.8 s) of silence
+   commits everything and empties the window. Pure silence never reaches the model
+   and only a `preroll_s` tail is kept.
+6. The first detected language is locked for the rest of the call
+   (`lock_language`), avoiding language flip-flop and the per-pass detection cost.
+
+A reader task drains WebSocket frames into a queue and `_drain_audio` pulls
+everything pending before each pass, so if a pass is slower than real time the
+stream stays live (latency grows, the backlog does not). Knobs live in the
+`streaming:` block of each `config/models/whisper_*.yaml`.
 
 ### 2.4 Concurrency and backpressure
 
@@ -176,7 +205,7 @@ immediately on the client side.
 |---|---|---|
 | `/` | GET | Serves `static/index.html` |
 | `/static/*` | GET | UI assets |
-| `/api/health` | GET | `model_ready`, active model/backend, process CPU %, RSS/VMS MB, thread count |
+| `/api/health` | GET | `model_ready`, active model/backend, `stream_mode`, process CPU %, RSS/VMS MB, thread count |
 | `/api/samples` | GET | Lists `test_audio/**/*.wav`; language inferred from the parent folder (`en`, `cn`/`zh`, `id`) |
 | `/api/samples/{path}` | GET | Returns one sample WAV |
 | `/ws/call-stream` | WebSocket | One call leg |
@@ -193,10 +222,10 @@ immediately on the client side.
 
 | Message | Fields |
 |---|---|
-| `connected` | `model_ready`, `message` |
-| `call_ready` | `message` |
+| `connected` | `model_ready`, `stream_mode`, `message` |
+| `call_ready` | `stream_mode`, `message` |
 | `chunk_ack` | `buffered_seconds`, `chunks_received`, `total_bytes` |
-| `transcript_delta` | `full_text`, `metrics` |
+| `transcript_delta` | `full_text`, `committed_text`, `tentative_text`, `metrics` (+ `stream_mode`, and `window_s` / `window_start_s` / `language` in sliding-window mode) |
 | `call_ended` | `final_text`, `metrics` (+ `total_call_time_s`) |
 
 ---
@@ -291,12 +320,12 @@ project root (the parent of `config/`).
 
 ## 7. Known limitations
 
-- **Whisper is not servable by the live server.** `_build_engine()` only handles
-  `onnx` and `transformers`; setting `default_model` to a `whisper_*` entry
-  raises `ValueError` at startup. Whisper is used through the benchmark.
-- **Duplicate text on commit.** After a commit, `main.py` reuses the committed
-  utterance's deltas as the interim text, so the just-committed sentence appears
-  twice in `full_text` until the next interim pass replaces it.
+- **Whisper streaming cost.** Each sliding-window pass re-encodes the window
+  (padded to 30 s by Whisper), so tiny costs ~1 s per pass on an 8-core CPU and
+  larger models cannot keep up with a 1 s hop (medium RTF > 2). Raise `hop_s` or
+  use a smaller model; latency, not correctness, degrades.
+- **LocalAgreement trade-off.** Committed text lags the speech by roughly one hop
+  and a word that two consecutive passes agree on can still be wrong (tiny model).
 - **No true incremental encoding.** Both model families use full-attention
   encoders; each interim pass re-encodes the whole open window (≤ 15 s).
 - **Fixed energy threshold.** The 0.02 RMS gate was calibrated on the bundled

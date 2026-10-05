@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RT-MASR — Live Voice Call Leg Simulator</title>
-  <meta name="description" content="Real-time multilingual ASR streaming simulator powered by ONNX Qwen3-ASR-0.6B. Monitor live latency, RTF, throughput and memory telemetry.">
+  <meta name="description" content="Real-time multilingual ASR streaming simulator powered by ONNX Qwen3-ASR or Whisper. Monitor live latency, RTF, throughput and memory telemetry.">
   <link rel="stylesheet" href="/static/style.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 </head>
@@ -30,7 +30,7 @@
         </div>
         <div>
           <h1>RT-MASR <span class="title-sub">Live Call Simulator</span></h1>
-          <p class="title-desc">ONNX Qwen3-ASR-0.6B · CPU Inference</p>
+          <p class="title-desc" id="title-desc">Loading model… · CPU Inference</p>
         </div>
       </div>
       <div class="header-right">
@@ -240,6 +240,11 @@
         <div class="card transcript-card">
           <div class="transcript-header">
             <h2>Live ASR Recognition Stream</h2>
+            <div class="transcript-legend" id="transcript-legend">
+              <span class="legend-final">confirmed</span>
+              <span class="legend-tentative">tentative</span>
+              <span class="legend-mode" id="stream-mode-label"></span>
+            </div>
             <div class="transcript-meta" id="transcript-meta"></div>
           </div>
           <div class="transcript-box" id="transcript-box">

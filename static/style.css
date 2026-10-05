@@ -375,6 +375,12 @@ h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.02em; line-height: 
 }
 .transcript-box::-webkit-scrollbar { width: 4px; }
 .transcript-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.transcript-box .tentative { color: var(--text-dim); font-style: italic; opacity: 0.8; }
+.transcript-legend { display: flex; gap: 10px; align-items: center; font-size: 0.68rem; font-family: var(--font-mono); }
+.legend-final      { color: #6ee7b7; }
+.legend-tentative  { color: var(--text-dim); font-style: italic; }
+.legend-mode       { color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.legend-mode:empty { display: none; }
 .placeholder { color: var(--text-dim); font-size: 0.9rem; font-style: italic; }
 
 .loading-text { color: var(--text-dim); font-size: 0.8rem; padding: 6px 0; }

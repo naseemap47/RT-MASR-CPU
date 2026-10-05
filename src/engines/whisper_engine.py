@@ -245,6 +245,12 @@ class _WhisperModelProxy:
         self._pipeline = pipeline
         self.model_name = model_name
 
+        # Per-call accumulators (the proxy is created fresh for every transcribe()
+        # call, so these are safe under concurrent calls on a shared pipeline).
+        self.encoder_s: float = 0.0
+        self.decoder_s: float = 0.0
+        self.decoder_calls: int = 0
+
         d = self._DimObj()
         for k, v in dims.items():
             setattr(d, k, v)
@@ -254,11 +260,14 @@ class _WhisperModelProxy:
     # ── whisper.decoding / transcribe API ───────────────────────────────────
 
     def embed_audio(self, mel: np.ndarray) -> np.ndarray:
-        return self._pipeline._encode(mel)
+        return self.encoder(mel)
 
     def encoder(self, mel: np.ndarray) -> np.ndarray:
         """Callable encoder shim for whisper.decoding._get_audio_features."""
-        return self._pipeline._encode(mel)
+        t0 = time.perf_counter()
+        out = self._pipeline._encode(mel)
+        self.encoder_s += time.perf_counter() - t0
+        return out
 
     def decoder(
         self,
@@ -268,11 +277,15 @@ class _WhisperModelProxy:
         offset: int,
     ):
         """Callable decoder shim for whisper.decoding.PyTorchInference.logits."""
-        return self._pipeline._decode_step(tokens, audio_features, kv_cache, offset)
+        t0 = time.perf_counter()
+        out = self._pipeline._decode_step(tokens, audio_features, kv_cache, offset)
+        self.decoder_s += time.perf_counter() - t0
+        self.decoder_calls += 1
+        return out
 
     def logits(self, tokens: np.ndarray, audio_features: np.ndarray) -> np.ndarray:
         kv = self._pipeline._new_kv_cache(tokens.shape[0], tokens.shape[-1])
-        logits, _ = self._pipeline._decode_step(tokens, audio_features, kv, offset=0)
+        logits, _ = self.decoder(tokens, audio_features, kv, 0)
         return logits
 
     def __call__(self, mel: np.ndarray, tokens: np.ndarray) -> np.ndarray:
@@ -390,11 +403,24 @@ class WhisperOnnxPipeline:
             for inp in self._decoder.get_inputs()
         }
 
+        # Import the decoding package and build the tokenizer now, so the first
+        # real request does not pay ~2 s of import / tokenizer-load time.
+        self._warm_decoding_stack()
+
         print(f"[whisper_engine] Pipeline ready  model={model_name}  precision={precision}.")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _warm_decoding_stack(self) -> None:
+        _ensure_whisper_in_path()
+        try:
+            import whisper.transcribe  # noqa: F401  (pulls in transformers' tokenizer)
+            from whisper.tokenizer import get_tokenizer
+            get_tokenizer(self.is_multilingual)
+        except ImportError:
+            pass  # reported with a clear message on the first transcribe() call
 
     def _new_kv_cache(self, n_group: int = 1, length: int = 1) -> np.ndarray:
         layers = _KV_LAYERS[self.model_name]
@@ -444,9 +470,14 @@ class WhisperOnnxPipeline:
         logprob_threshold: float = -1.0,
         no_speech_threshold: float = 0.6,
         verbose: bool = False,
+        fallback: bool = True,
     ) -> dict:
         """
         Transcribe audio using the Whisper ONNX model.
+
+        ``fallback=False`` disables the temperature-fallback retries (a single
+        pass at the given temperature); ``beam_size`` of ``None`` or ``1`` means
+        greedy decoding. Both are used by the streaming path to bound latency.
 
         Delegates segment-level logic (timestamp parsing, beam search,
         temperature fallback) to ``whisper.transcribe.transcribe()`` from
@@ -474,9 +505,22 @@ class WhisperOnnxPipeline:
         audio_duration_s = len(wav) / SAMPLE_RATE
         t_load = time.time() - t0
 
+        # Too short to contain a mel frame (< 0.1 s): nothing to transcribe.
+        if audio_duration_s < 0.1:
+            return {
+                "text": "", "segments": [], "language": language or "",
+                "timing": {
+                    "load_s": t_load, "mel_s": 0.0, "encoder_s": 0.0, "prefill_s": 0.0,
+                    "decode_s": 0.0, "other_s": 0.0, "tokens_generated": 0,
+                    "total_s": time.time() - t_total_start,
+                    "audio_duration_s": audio_duration_s, "rtf": 0.0, "segments": 0,
+                },
+            }
+
         # ── Build model proxy and run whisper.transcribe() ──────────────────
         _ensure_whisper_in_path()
         try:
+            from whisper.audio import log_mel_spectrogram
             from whisper.transcribe import transcribe as _whisper_transcribe
         except ImportError as exc:
             raise ImportError(
@@ -491,10 +535,18 @@ class WhisperOnnxPipeline:
             dims=self.dims,
         )
 
+        # ── Mel spectrogram (timed here, then handed to whisper.transcribe) ──
+        t0 = time.time()
+        mel = log_mel_spectrogram(wav, self.dims["n_mels"])
+        t_mel = time.time() - t0
+
+        if beam_size is not None and beam_size <= 1:
+            beam_size = None          # greedy
+
         # Build temperature tuple (mirrors cli() logic in transcribe.py)
         if isinstance(temperature, (int, float)):
             if temperature == 0.0:
-                temp_arg = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+                temp_arg = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if fallback else (0.0,)
             else:
                 temp_arg = (float(temperature),)
         else:
@@ -504,6 +556,7 @@ class WhisperOnnxPipeline:
         result = _whisper_transcribe(
             model=proxy,
             audio=wav,
+            mel=mel,
             verbose=True if verbose else None,   # None = silent (no tqdm bar)
             temperature=temp_arg,
             compression_ratio_threshold=compression_ratio_threshold,
@@ -515,13 +568,18 @@ class WhisperOnnxPipeline:
             beam_size=beam_size,
             best_of=best_of,
         )
-        t_decode = time.time() - t0
+        t_transcribe = time.time() - t0
         t_total  = time.time() - t_total_start
 
+        n_tokens = sum(len(seg.get("tokens", [])) for seg in result.get("segments", []))
         result["timing"] = {
             "load_s":           t_load,
-            "mel_s":            0.0,   # mel is computed inside whisper.transcribe (included in decode_s)
-            "decode_s":         t_decode,
+            "mel_s":            t_mel,
+            "encoder_s":        proxy.encoder_s,            # sum of encoder ONNX runs
+            "prefill_s":        0.0,                        # n/a: Whisper has no separate prefill
+            "decode_s":         proxy.decoder_s,            # sum of decoder ONNX steps (incl. language id)
+            "other_s":          max(0.0, t_transcribe - proxy.encoder_s - proxy.decoder_s),  # beam search, tokenizer, python
+            "tokens_generated": n_tokens,
             "total_s":          t_total,
             "audio_duration_s": audio_duration_s,
             "rtf":              t_total / audio_duration_s if audio_duration_s > 0 else 0.0,
@@ -659,6 +717,7 @@ class WhisperOnnxEngine:
         task: str = "transcribe",
         beam_size: Optional[int] = None,
         verbose: bool = False,
+        fallback: bool = True,
     ) -> dict:
         """
         Transcribe an audio file or numpy waveform.
@@ -670,6 +729,8 @@ class WhisperOnnxEngine:
         task:      ``"transcribe"`` or ``"translate"``.
         beam_size: Override beam width (``None`` = use engine default).
         verbose:   Print segment timestamps while decoding.
+        fallback:  ``False`` = no temperature-fallback retries (single pass; faster,
+                   used by the live-streaming path).
 
         Returns
         -------
@@ -677,7 +738,7 @@ class WhisperOnnxEngine:
             text      – full transcript string
             segments  – list of timed segment dicts
             language  – detected / forced language code
-            timing    – wall-clock breakdown + RTF
+            timing    – mel_s / encoder_s / decode_s / other_s breakdown, total_s, RTF
         """
         return self.pipeline.transcribe(
             audio       = audio,
@@ -686,6 +747,7 @@ class WhisperOnnxEngine:
             beam_size   = beam_size if beam_size is not None else self.beam_size,
             temperature = self.temperature,
             verbose     = verbose,
+            fallback    = fallback,
         )
 
     def transcribe_stream(
@@ -815,7 +877,7 @@ def _cli():
                 print(f"Language : {result['language']}")
             print(f"Text     : {result['text']}")
             print(
-                f"\nTiming   : mel={t['mel_s']:.2f}s | decode={t['decode_s']:.2f}s | "
+                f"\nTiming   : mel={t['mel_s']:.2f}s | enc={t['encoder_s']:.2f}s | dec={t['decode_s']:.2f}s | "
                 f"total={t['total_s']:.2f}s | RTF={t['rtf']:.2f}x | "
                 f"Segments={t['segments']}"
             )

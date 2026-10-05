@@ -33,7 +33,7 @@ config is recorded under `failures` and the run continues with the next config;
 
 | Key | Meaning | Default |
 |---|---|---|
-| `configs[]` | `id`, `display_name`, `backend` (`onnx` / `transformers` / `whisper`), `model_config` (per-model YAML) | 3 Qwen3 + 4 Whisper INT8 |
+| `configs[]` | `id`, `display_name`, `backend` (`onnx` / `transformers` / `whisper`), `model_config` (per-model YAML), optional `enabled` (default `true`) | 7 Qwen3 + 4 Whisper INT8 (`qwen3_onnx_fp32_1.7b` disabled) |
 | `runs` | Measured runs per audio file | 3 |
 | `warmup_runs` | Discarded runs per audio file | 1 |
 | `concurrency_legs` | Simultaneous legs to test | `[1, 2, 4]` |
@@ -50,6 +50,27 @@ Available config ids: `qwen3_onnx_int8_0.6b`, `qwen3_onnx_fp32_0.6b`, `qwen3_onn
 
 Missing audio files are skipped with a warning. All relative paths are resolved
 from the project root, so the script can be launched from anywhere.
+
+### Disabling / enabling a config
+
+Add `enabled: false` to an entry to leave it out of the default run (useful for
+models your machine cannot handle). Omitting the key means enabled. Example —
+`qwen3_onnx_fp32_1.7b` (~10 GB of weights) is disabled in the shipped config:
+
+```yaml
+  - id: "qwen3_onnx_fp32_1.7b"
+    enabled: false              # ← disabled: skipped by `run_benchmark.py` with no --models
+    display_name: "Qwen3-ASR-1.7B FP32 (ONNX / CPU)"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx_1.7b_fp32.yaml"
+```
+
+- **Disable:** set `enabled: false` (or delete/comment out the entry).
+- **Enable permanently:** set `enabled: true` or remove the `enabled` line.
+- **Enable for one run only:** name it explicitly; `--models` ignores `enabled`:
+  `uv run python benchmark/run_benchmark.py --models qwen3_onnx_fp32_1.7b --runs 1`
+
+A default run prints `Skipping disabled config(s): ...` so it is clear what was left out.
 
 ---
 

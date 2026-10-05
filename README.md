@@ -318,14 +318,27 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,qwen3_tra
 uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_small
 ```
 
-Config ids: `qwen3_onnx_int8_0.6b`, `qwen3_onnx_fp32_0.6b`, `qwen3_onnx_int4_0.6b`, `qwen3_onnx_fp32_1.7b`,
-`qwen3_onnx_int4_1.7b` (the last four need their models downloaded first),
+Config ids: `qwen3_onnx_int8_0.6b`, `qwen3_onnx_fp32_0.6b`, `qwen3_onnx_int4_0.6b`, `qwen3_onnx_fp32_1.7b`
+(disabled by default), `qwen3_onnx_int4_1.7b` (all but the first need their models downloaded first),
 `qwen3_transformers_bf16_0.6b`, `qwen3_transformers_bf16_1.7b`,
 `whisper_int8_tiny`, `whisper_int8_base`, `whisper_int8_small`,
 `whisper_int8_medium`. Reports are written to
 `benchmark/results/<UTC timestamp>_raw.json` and `_summary.md`. See
 [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) for what each
 stage measures and how to read the results.
+
+**Disable / enable a config.** Add `enabled: false` to its entry in
+`benchmark/configs/bench_config.yaml` to skip it in default runs (omit the key or
+set `true` to enable). Example, as shipped for the 1.7B FP32 model (~10 GB, too
+large for some machines):
+
+```yaml
+  - id: "qwen3_onnx_fp32_1.7b"
+    enabled: false          # set true (or remove this line) to include it again
+```
+
+A disabled config can still be run once by naming it:
+`uv run python benchmark/run_benchmark.py --models qwen3_onnx_fp32_1.7b --runs 1`.
 
 Sample results from `benchmark/results/20261004T095157Z_summary.md` (8 physical
 / 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s):

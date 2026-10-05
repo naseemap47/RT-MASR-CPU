@@ -2,13 +2,13 @@
 # config/config.yaml  —  RT-MASR server top-level configuration
 #
 # Model variants and their per-model settings live in config/models/:
-#   config/models/models.yaml             ← model registry (all variants)
-#   config/models/qwen3_onnx_0.6b_int8.yaml                ← ONNX backend, 0.6B INT8 (ONNXQwen3ASR)
-#   config/models/qwen3_onnx_{0.6b,1.7b}_{fp32,int4}.yaml  ← ONNX backend, 0.6B/1.7B FP32 + INT4 (ONNXQwen3ASR)
-#   config/models/qwen3_0.6b.yaml         ← Transformers 0.6B   (Qwen3ASR)
-#   config/models/qwen3_1.7b.yaml         ← Transformers 1.7B   (Qwen3ASR)
-#   config/models/whisper_int8_*.yaml     ← Whisper ONNX INT8   (tiny/base/small/medium)
-#   config/models/whisper_fp16.yaml, whisper_fp32.yaml   ← Whisper ONNX, other precisions
+#   config/models/models.yaml                              ← model registry (all variants)
+#   config/models/qwen3_onnx_0.6b_int8.yaml                ← Qwen3 ONNX 0.6B INT8   (ONNXQwen3ASR)
+#   config/models/qwen3_onnx_{0.6b,1.7b}_{fp32,int4}.yaml  ← Qwen3 ONNX 0.6B/1.7B FP32 + INT4 (ONNXQwen3ASR)
+#   config/models/qwen3_0.6b.yaml                          ← Qwen3 Transformers 0.6B (Qwen3ASR)
+#   config/models/qwen3_1.7b.yaml                          ← Qwen3 Transformers 1.7B (Qwen3ASR)
+#   config/models/whisper_int8_*.yaml                      ← Whisper ONNX INT8 (tiny/base/small/medium)
+#   config/models/whisper_fp16.yaml, whisper_fp32.yaml     ← Whisper ONNX, other precisions
 # ──────────────────────────────────────────────────────────────────────────────
 
 server:
@@ -18,12 +18,18 @@ server:
 
 # Active model — must match a "name" entry in config/models/models.yaml registry.
 #
-#   "qwen3_onnx_0.6b_int8" — ONNX Runtime, INT8 decoder, fastest on CPU, no PyTorch
-#   "qwen3_onnx_0.6b_fp32" / "qwen3_onnx_0.6b_int4"  — ONNX Runtime 0.6B, FP32 / INT4
-#   "qwen3_onnx_1.7b_fp32" / "qwen3_onnx_1.7b_int4"  — ONNX Runtime 1.7B, FP32 / INT4
-#   "qwen3_0.6b"           — Transformers 0.6B, balanced speed/accuracy, needs PyTorch
-#   "qwen3_1.7b"           — Transformers 1.7B, highest accuracy, slowest on CPU
+#   Qwen3-ASR — ONNX Runtime (no PyTorch):
+#   "qwen3_onnx_0.6b_int8" — 0.6B INT8, fastest Qwen3 option on CPU
+#   "qwen3_onnx_0.6b_fp32" — 0.6B FP32 (fused-encoder export)
+#   "qwen3_onnx_0.6b_int4" — 0.6B INT4, smallest memory footprint
+#   "qwen3_onnx_1.7b_fp32" — 1.7B FP32, ~10 GB of weights, needs a lot of RAM
+#   "qwen3_onnx_1.7b_int4" — 1.7B INT4, higher accuracy than 0.6B at ~4 GB
 #
+#   Qwen3-ASR — Transformers (needs PyTorch):
+#   "qwen3_0.6b"           — 0.6B BF16, balanced speed/accuracy
+#   "qwen3_1.7b"           — 1.7B BF16, highest accuracy, slowest on CPU
+#
+#   Whisper — ONNX Runtime:
 #   "whisper_int8_tiny"   — Whisper ONNX INT8, real-time on CPU, multilingual
 #   "whisper_int8_base"   — Whisper base, more accurate than tiny, slower
 #   "whisper_int8_small"  — Whisper small,  slower than real time on CPU
@@ -33,7 +39,7 @@ server:
 # Qwen models stream per speech utterance (VAD); Whisper models stream with a
 # sliding window (see the `streaming:` block in config/models/whisper_*.yaml).
 # The RT_MASR_MODEL environment variable overrides this value for one run.
-default_model: "whisper_int8_tiny"
+default_model: "qwen3_onnx_0.6b_int4"
 
 # Registry file that lists all available model variants.
 model_registry: "config/models/models.yaml"

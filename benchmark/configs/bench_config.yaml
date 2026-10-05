@@ -4,6 +4,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Configurations to benchmark. Each entry maps to an engine class + config.
+# Optional per-entry key `enabled` (default true): `enabled: false` skips the entry
+# in a default run. `--models <id>` still runs it explicitly.
 configs:
   - id: "qwen3_onnx_int8_0.6b"
     display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
@@ -23,6 +25,7 @@ configs:
     model_config: "config/models/qwen3_onnx_0.6b_int4.yaml"
 
   - id: "qwen3_onnx_fp32_1.7b"           # ~10 GB of weights: needs a lot of RAM, use --runs 1 on small machines
+    enabled: false                       # skipped by default; set true (or pass --models qwen3_onnx_fp32_1.7b) to run
     display_name: "Qwen3-ASR-1.7B FP32 (ONNX / CPU)"
     backend: "onnx"
     model_config: "config/models/qwen3_onnx_1.7b_fp32.yaml"

@@ -161,7 +161,7 @@ All of these numbers can be changed in the `streaming:` block of
 
 | Situation | Suggestion |
 |---|---|
-| Smoothest live demo on a normal CPU | `qwen3_onnx` or `whisper_int8_tiny` |
+| Smoothest live demo on a normal CPU | `qwen3_onnx_0.6b_int8` or `whisper_int8_tiny` |
 | Best accuracy, slower than real time is OK | `qwen3_1.7b` (Transformers) |
 | Whisper but better quality than tiny | `whisper_int8_base` / `small` — expect more delay |
 

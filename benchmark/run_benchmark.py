@@ -5,7 +5,7 @@ ASR CPU Benchmark Pipeline (Qwen3-ASR + Whisper) — CLI Entry Point.
 
 Usage:
     python3 benchmark/run_benchmark.py
-    python3 benchmark/run_benchmark.py --models onnx_int8,whisper_int8_tiny
+    python3 benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_tiny
     python3 benchmark/run_benchmark.py --legs 1,2,4 --runs 5
     python3 benchmark/run_benchmark.py --skip-accuracy --skip-concurrency
     python3 benchmark/run_benchmark.py --output-dir /tmp/bench_results
@@ -200,6 +200,7 @@ def main() -> None:
     # Filter configs
     all_configs = cfg.get("configs", [])
     if args.models:
+        # Explicitly named ids always run, even if `enabled: false` in the YAML.
         wanted = [m.strip() for m in args.models.split(",") if m.strip()]
         known = {c["id"] for c in all_configs}
         unknown = [m for m in wanted if m not in known]
@@ -207,6 +208,13 @@ def main() -> None:
             print(f"Unknown config id(s): {unknown}. Available: {sorted(known)}")
             sys.exit(1)
         all_configs = [c for c in all_configs if c["id"] in set(wanted)]
+    else:
+        # Default run: skip configs marked `enabled: false` (default is enabled).
+        disabled = [c["id"] for c in all_configs if not c.get("enabled", True)]
+        if disabled:
+            print(f"Skipping disabled config(s): {', '.join(disabled)} "
+                  f"(run explicitly with --models <id> or set enabled: true)")
+        all_configs = [c for c in all_configs if c.get("enabled", True)]
     if not all_configs:
         print("No configs selected. Check --models or bench_config.yaml.")
         sys.exit(1)

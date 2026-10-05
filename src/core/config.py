@@ -61,7 +61,7 @@ def load_server_config(config_path: str = "config/config.yaml") -> dict[str, Any
     Returns the full dict, e.g.:
         {
             "server":         { "host": ..., "port": ..., "log_level": ... },
-            "default_model":  "qwen3_onnx",
+            "default_model":  "qwen3_onnx_0.6b_int8",
             "model_registry": "config/models/models.yaml",
         }
     """
@@ -76,7 +76,7 @@ def load_model_registry(registry_path: str) -> list[dict[str, Any]]:
 
     Returns the list under the ``models`` key:
         [
-            {"name": "qwen3_onnx", "config": "...", "backend": "onnx", ...},
+            {"name": "qwen3_onnx_0.6b_int8", "config": "...", "backend": "onnx", ...},
             {"name": "qwen3_0.6b", "config": "...", "backend": "transformers", ...},
             ...
         ]
@@ -91,7 +91,7 @@ def get_registry_entry(registry_path: str, model_name: str) -> dict[str, Any]:
 
     Args:
         registry_path: Path to the model registry YAML.
-        model_name:    The ``name`` value to look up (e.g. "qwen3_onnx").
+        model_name:    The ``name`` value to look up (e.g. "qwen3_onnx_0.6b_int8").
 
     Raises:
         KeyError: If no entry with the given name exists.
@@ -119,7 +119,7 @@ def resolve_model_config(
     Steps:
       1. Load config.yaml → ``default_model`` / ``model_registry``.
       2. Load the registry → find the matching entry.
-      3. Load and return the per-model YAML (e.g. config/models/qwen3_onnx.yaml).
+      3. Load and return the per-model YAML (e.g. config/models/qwen3_onnx_0.6b_int8.yaml).
 
     Args:
         config_path: Path to config/config.yaml (default).
@@ -129,7 +129,7 @@ def resolve_model_config(
     Returns:
         The per-model config dict, e.g.:
         {
-            "name": "qwen3_onnx",
+            "name": "qwen3_onnx_0.6b_int8",
             "backend": "onnx",
             "download": { ... },
             "engine":   { "onnx_dir": ..., "num_threads": ..., ... },

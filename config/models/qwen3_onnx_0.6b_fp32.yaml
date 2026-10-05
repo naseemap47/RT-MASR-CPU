@@ -1,0 +1,57 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/qwen3_onnx_0.6b_fp32.yaml
+#
+# Qwen3-ASR-0.6B  FP32  —  Pure ONNX Runtime backend (no PyTorch)
+#   Engine  : ONNXQwen3ASR  (src/engines/qwen3_onnx_engine.py)
+#   HF repo : andrewleech/qwen3-asr-0.6b-onnx
+#   Local   : models/qwen3-asr-onnx-0.6b-fp32
+#   Download: uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_fp32
+#
+#   Fused layout: one encoder graph + decoder_init / decoder_step graphs.
+#   Full precision: highest accuracy, largest download / RAM footprint.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "qwen3_onnx_0.6b_fp32"
+display_name: "Qwen3-ASR-0.6B FP32 (ONNX / CPU)"
+backend: "onnx"                  # → loads src/engines/qwen3_onnx_engine.py :: ONNXQwen3ASR
+
+download:
+  repo_id: "andrewleech/qwen3-asr-0.6b-onnx"
+  target_dir: "models/qwen3-asr-onnx-0.6b-fp32"
+  method: "hf_files"             # uses DownloadModels.download_hf_files()
+  files:                         # shared files + the fp32 weights (sizes are verified)
+    - "embed_tokens.bin"         # FP16 embedding table
+    - "config.json"
+    - "preprocessor_config.json"
+    - "tokenizer.json"
+    - "tokenizer_config.json"
+    - "added_tokens.json"
+    - "vocab.json"
+    - "encoder.onnx"
+    - "decoder_init.onnx"
+    - "decoder_step.onnx"
+    - "decoder_weights.data"
+
+engine:
+  onnx_dir: "models/qwen3-asr-onnx-0.6b-fp32"
+  num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
+  quantize: "fp32"             # "fp32" | "int4"  (selects the *.fp32.onnx graphs)
+  language: null                 # null = auto-detect; "English" | "Chinese" | "Indonesian"  (aliases en / zh / mandarin / id also work)
+
+inference:
+  max_new_tokens: 512
+  chunk_sec: 30                  # seconds per window for silence-split long audio
+
+audio:
+  sample_rate: 16000
+  n_mels: 128
+
+ort_session:
+  graph_optimization_level: "all"   # ORT_ENABLE_ALL — recommended for CPU
+  log_severity_level: 3             # 0=verbose … 3=error
+  providers:
+    - "CPUExecutionProvider"
+
+streaming:
+  min_buffer_samples: 8000       # trigger inference after ≥0.5 s buffered
+  infer_every_n_chunks: 2        # throttle: run inference every N PCM chunks

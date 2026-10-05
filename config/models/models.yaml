@@ -14,15 +14,52 @@
 models:
 
   # ── ONNX backend (recommended for production / low-latency) ──────────────
-  - name: "qwen3_onnx"
-    config: "config/models/qwen3_onnx.yaml"
+  - name: "qwen3_onnx_0.6b_int8"
+    config: "config/models/qwen3_onnx_0.6b_int8.yaml"
     backend: "onnx"
     engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
-    model_dir: "models/qwen3-asr-onnx"
+    model_dir: "models/qwen3-asr-onnx-0.6b-int8"
     hf_repo: "Daumee/Qwen3-ASR-0.6B-ONNX-CPU"
     description: >
       Pure ONNX Runtime inference — no PyTorch required.
       Fastest CPU option with INT8 quantised decoder and true token-streaming.
+
+  # ── ONNX backend — fused-encoder exports (0.6B / 1.7B, FP32 / INT4) ────────
+  - name: "qwen3_onnx_0.6b_fp32"
+    config: "config/models/qwen3_onnx_0.6b_fp32.yaml"
+    backend: "onnx"
+    engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
+    model_dir: "models/qwen3-asr-onnx-0.6b-fp32"
+    hf_repo: "andrewleech/qwen3-asr-0.6b-onnx"
+    description: >
+      Pure ONNX Runtime inference — no PyTorch required. Full-precision 0.6B ONNX export (~4 GB). Best 0.6B accuracy; heavier on RAM.
+
+  - name: "qwen3_onnx_0.6b_int4"
+    config: "config/models/qwen3_onnx_0.6b_int4.yaml"
+    backend: "onnx"
+    engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
+    model_dir: "models/qwen3-asr-onnx-0.6b-int4"
+    hf_repo: "andrewleech/qwen3-asr-0.6b-onnx"
+    description: >
+      Pure ONNX Runtime inference — no PyTorch required. INT4 (RTN, block 64) 0.6B ONNX export (~2 GB). Small and fast on CPU.
+
+  - name: "qwen3_onnx_1.7b_fp32"
+    config: "config/models/qwen3_onnx_1.7b_fp32.yaml"
+    backend: "onnx"
+    engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
+    model_dir: "models/qwen3-asr-onnx-1.7b-fp32"
+    hf_repo: "andrewleech/qwen3-asr-1.7b-onnx"
+    description: >
+      Pure ONNX Runtime inference — no PyTorch required. Full-precision 1.7B ONNX export (~10 GB). Highest accuracy; slowest, needs ~12 GB RAM.
+
+  - name: "qwen3_onnx_1.7b_int4"
+    config: "config/models/qwen3_onnx_1.7b_int4.yaml"
+    backend: "onnx"
+    engine_class: "ONNXQwen3ASR"            # src/engines/qwen3_onnx_engine.py
+    model_dir: "models/qwen3-asr-onnx-1.7b-int4"
+    hf_repo: "andrewleech/qwen3-asr-1.7b-onnx"
+    description: >
+      Pure ONNX Runtime inference — no PyTorch required. INT4 (RTN, block 64) 1.7B ONNX export. Highest-accuracy model at a fraction of the FP32 size.
 
   # ── Transformers backend — 0.6B ───────────────────────────────────────────
   - name: "qwen3_0.6b"

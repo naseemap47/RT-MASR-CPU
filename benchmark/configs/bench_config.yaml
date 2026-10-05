@@ -4,18 +4,43 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Configurations to benchmark. Each entry maps to an engine class + config.
+# Optional per-entry key `enabled` (default true): `enabled: false` skips the entry
+# in a default run. `--models <id>` still runs it explicitly.
 configs:
-  - id: "onnx_int8"
+  - id: "qwen3_onnx_int8_0.6b"
     display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
     backend: "onnx"
-    model_config: "config/models/qwen3_onnx.yaml"
+    model_config: "config/models/qwen3_onnx_0.6b_int8.yaml"
 
-  - id: "transformers_bf16_0.6b"
+  # ── Fused-encoder ONNX exports (andrewleech/qwen3-asr-*-onnx), FP32 / INT4 ──
+  #    Download first: uv run python src/utils/download_utils.py --model <name>
+  - id: "qwen3_onnx_fp32_0.6b"
+    display_name: "Qwen3-ASR-0.6B FP32 (ONNX / CPU)"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx_0.6b_fp32.yaml"
+
+  - id: "qwen3_onnx_int4_0.6b"
+    display_name: "Qwen3-ASR-0.6B INT4 (ONNX / CPU)"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx_0.6b_int4.yaml"
+
+  - id: "qwen3_onnx_fp32_1.7b"           # ~10 GB of weights: needs a lot of RAM, use --runs 1 on small machines
+    enabled: false                       # skipped by default; set true (or pass --models qwen3_onnx_fp32_1.7b) to run
+    display_name: "Qwen3-ASR-1.7B FP32 (ONNX / CPU)"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx_1.7b_fp32.yaml"
+
+  - id: "qwen3_onnx_int4_1.7b"
+    display_name: "Qwen3-ASR-1.7B INT4 (ONNX / CPU)"
+    backend: "onnx"
+    model_config: "config/models/qwen3_onnx_1.7b_int4.yaml"
+
+  - id: "qwen3_transformers_bf16_0.6b"
     display_name: "Qwen3-ASR-0.6B BF16 (Transformers / CPU)"
     backend: "transformers"
     model_config: "config/models/qwen3_0.6b.yaml"
 
-  - id: "transformers_bf16_1.7b"
+  - id: "qwen3_transformers_bf16_1.7b"
     display_name: "Qwen3-ASR-1.7B BF16 (Transformers / CPU)"
     backend: "transformers"
     model_config: "config/models/qwen3_1.7b.yaml"

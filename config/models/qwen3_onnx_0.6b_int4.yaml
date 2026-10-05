@@ -1,40 +1,41 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# config/models/qwen3_onnx.yaml
+# config/models/qwen3_onnx_0.6b_int4.yaml
 #
-# Qwen3-ASR-0.6B-ONNX  —  Pure ONNX Runtime backend (no PyTorch)
+# Qwen3-ASR-0.6B  INT4  —  Pure ONNX Runtime backend (no PyTorch)
 #   Engine  : ONNXQwen3ASR  (src/engines/qwen3_onnx_engine.py)
-#   HF repo : Daumee/Qwen3-ASR-0.6B-ONNX-CPU
-#   Local   : models/qwen3-asr-onnx
-#   Download: DownloadModels().qwen3_0_6b_asr_onnx_model(
-#               repo_id="Daumee/Qwen3-ASR-0.6B-ONNX-CPU",
-#               target_dir="models/qwen3-asr-onnx")
+#   HF repo : andrewleech/qwen3-asr-0.6b-onnx
+#   Local   : models/qwen3-asr-onnx-0.6b-int4
+#   Download: uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int4
 #
-#   vs Transformers backends: faster on CPU, no PyTorch dependency,
-#   true token-streaming (character-by-character deltas), supports INT8 decoder.
+#   Fused layout: one encoder graph + decoder_init / decoder_step graphs.
+#   INT4 (RTN, block 64) weights: much smaller download and RAM; small accuracy cost.
 # ──────────────────────────────────────────────────────────────────────────────
 
-name: "qwen3_onnx"
-display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
+name: "qwen3_onnx_0.6b_int4"
+display_name: "Qwen3-ASR-0.6B INT4 (ONNX / CPU)"
 backend: "onnx"                  # → loads src/engines/qwen3_onnx_engine.py :: ONNXQwen3ASR
 
 download:
-  repo_id: "Daumee/Qwen3-ASR-0.6B-ONNX-CPU"
-  target_dir: "models/qwen3-asr-onnx"
-  method: "onnx"                 # uses DownloadModels.qwen3_0_6b_asr_onnx_model()
-  required_files:
-    - "decoder_init.int8.onnx"
-    - "decoder_step.int8.onnx"
-    - "embed_tokens.bin"
-    - "encoder_conv.onnx"
-    - "encoder_conv.onnx.data"
-    - "encoder_transformer.onnx"
-    - "encoder_transformer.onnx.data"
+  repo_id: "andrewleech/qwen3-asr-0.6b-onnx"
+  target_dir: "models/qwen3-asr-onnx-0.6b-int4"
+  method: "hf_files"             # uses DownloadModels.download_hf_files()
+  files:                         # shared files + the int4 weights (sizes are verified)
+    - "embed_tokens.bin"         # FP16 embedding table
+    - "config.json"
+    - "preprocessor_config.json"
     - "tokenizer.json"
+    - "tokenizer_config.json"
+    - "added_tokens.json"
+    - "vocab.json"
+    - "encoder.int4.onnx"
+    - "decoder_init.int4.onnx"
+    - "decoder_step.int4.onnx"
+    - "decoder_weights.int4.data"
 
 engine:
-  onnx_dir: "models/qwen3-asr-onnx"
+  onnx_dir: "models/qwen3-asr-onnx-0.6b-int4"
   num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
-  quantize: "int8"               # "int8" | "fp32"  (int8 decoder is smaller and faster)
+  quantize: "int4"             # "fp32" | "int4"  (selects the *.int4.onnx graphs)
   language: null                 # null = auto-detect; "English" | "Chinese" | "Indonesian"  (aliases en / zh / mandarin / id also work)
 
 inference:
@@ -43,12 +44,11 @@ inference:
 
 audio:
   sample_rate: 16000
-  n_mels: 128                    # fixed by the exported ONNX encoder graph
-  encoder_chunk_size: 100        # mel frames per ONNX encoder call (CHUNK_SIZE constant)
+  n_mels: 128
 
 ort_session:
   graph_optimization_level: "all"   # ORT_ENABLE_ALL — recommended for CPU
-  log_severity_level: 3             # 0=verbose … 3=error (suppresses ORT deprecation noise)
+  log_severity_level: 3             # 0=verbose … 3=error
   providers:
     - "CPUExecutionProvider"
 

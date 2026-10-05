@@ -38,7 +38,7 @@ flowchart LR
     end
 
     subgraph Engines["src/engines/"]
-        E1["ONNXQwen3ASR<br/>Qwen3-ASR-0.6B ONNX INT8"]
+        E1["ONNXQwen3ASR<br/>Qwen3-ASR 0.6B / 1.7B ONNX<br/>INT8 · INT4 · FP32"]
         E2["Qwen3ASR<br/>Transformers 0.6B / 1.7B"]
         E3["WhisperOnnxEngine<br/>+ sliding-window streamer"]
     end
@@ -116,6 +116,7 @@ src/
   utils/
     audio_utils.py          Audio loading, mel spectrogram, silence splitting
     download_utils.py       Model downloader (CLI)
+    check_models.py         Self-test: which models run on this PC
   whisper/                  Vendored Whisper tokenizer/decoding (whisper-onnx-cpu)
 config/
   config.yaml               Server settings + default_model
@@ -181,7 +182,11 @@ Hugging Face token is needed.
 
 | Registry name | Backend | Source | Local directory | Size on disk |
 |---|---|---|---|---|
-| `qwen3_onnx` | `onnx` | HF [`Daumee/Qwen3-ASR-0.6B-ONNX-CPU`](https://huggingface.co/Daumee/Qwen3-ASR-0.6B-ONNX-CPU) | `models/qwen3-asr-onnx` | 2.5 GB |
+| `qwen3_onnx_0.6b_int8` | `onnx` | HF [`Daumee/Qwen3-ASR-0.6B-ONNX-CPU`](https://huggingface.co/Daumee/Qwen3-ASR-0.6B-ONNX-CPU) | `models/qwen3-asr-onnx-0.6b-int8` | 2.5 GB |
+| `qwen3_onnx_0.6b_fp32` | `onnx` | HF [`andrewleech/qwen3-asr-0.6b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx) (FP32 files) | `models/qwen3-asr-onnx-0.6b-fp32` | 4.1 GB |
+| `qwen3_onnx_0.6b_int4` | `onnx` | HF [`andrewleech/qwen3-asr-0.6b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx) (INT4 files) | `models/qwen3-asr-onnx-0.6b-int4` | 2.0 GB |
+| `qwen3_onnx_1.7b_fp32` | `onnx` | HF [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) (FP32 files) | `models/qwen3-asr-onnx-1.7b-fp32` | 10.0 GB |
+| `qwen3_onnx_1.7b_int4` | `onnx` | HF [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) (INT4 files) | `models/qwen3-asr-onnx-1.7b-int4` | 4.1 GB |
 | `qwen3_0.6b` | `transformers` | HF [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | `models/qwen3-asr-0.6b` | 1.8 GB |
 | `qwen3_1.7b` | `transformers` | HF [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | `models/qwen3-asr-1.7b` | 4.4 GB |
 | `whisper_int8_{tiny,base,small,medium}` | `whisper` | PINTO model zoo, INT8 tarball | `models/whisper_int8` (shared) | 5.5 GB |
@@ -190,7 +195,13 @@ Hugging Face token is needed.
 
 ```bash
 # Recommended minimum for the live demo
-uv run python src/utils/download_utils.py --model qwen3_onnx
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int8
+
+# Fused-encoder ONNX exports: 0.6B / 1.7B, FP32 or INT4 (add --dry-run to list files first)
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int4
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_fp32
+uv run python src/utils/download_utils.py --model qwen3_onnx_1.7b_int4
+uv run python src/utils/download_utils.py --model qwen3_onnx_1.7b_fp32
 
 # Transformers variants (for comparison)
 uv run python src/utils/download_utils.py --model qwen3_0.6b
@@ -203,17 +214,54 @@ uv run python src/utils/download_utils.py --model whisper_int8
 uv run python src/utils/download_utils.py
 
 # Re-download even if files exist
-uv run python src/utils/download_utils.py --model qwen3_onnx --force
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int8 --force
 ```
 
 A download is skipped when its target already looks complete (the required ONNX
-files for `qwen3_onnx`, a non-empty directory for the others). Expected files:
+files for `qwen3_onnx_0.6b_int8`, a non-empty directory for the others). Expected files:
 
 ```
-models/qwen3-asr-onnx/   decoder_init.int8.onnx  decoder_step.int8.onnx  embed_tokens.bin
-                         encoder_conv.onnx(.data)  encoder_transformer.onnx(.data)  tokenizer.json
-models/whisper_int8/     {tiny,base,small,medium}_{encoder,decoder}_11_int8.onnx  ...
+models/qwen3-asr-onnx-0.6b-int8/   decoder_init.int8.onnx  decoder_step.int8.onnx  embed_tokens.bin
+                                   encoder_conv.onnx(.data)  encoder_transformer.onnx(.data)  tokenizer.json
+models/qwen3-asr-onnx-<size>-<prec>/   encoder[.int4].onnx  decoder_init[.int4].onnx  decoder_step[.int4].onnx
+                                       decoder_weights[.int4].data  embed_tokens.bin (FP16)  config.json  tokenizer.json  ...
+models/whisper_int8/               {tiny,base,small,medium}_{encoder,decoder}_11_int8.onnx  ...
 ```
+
+---
+
+## Which model can my PC run?
+
+After downloading, let the machine pick for you. `check_models.py` loads each
+downloaded model in its own subprocess, transcribes a ~10 s clip and reports load
+time, latency, real-time factor (RTF) and peak RAM. A model that runs out of memory
+or hangs is killed and reported; it cannot crash the script.
+
+```bash
+# Check every model in the registry (a few minutes; the large ones take longest)
+uv run python src/utils/check_models.py
+
+# Only some models / only static checks (files, deps, estimated RAM; takes seconds)
+uv run python src/utils/check_models.py --models whisper_int8_tiny,qwen3_onnx_0.6b_int8
+uv run python src/utils/check_models.py --no-run
+
+# Also try models predicted to need more RAM than is free; save a JSON report
+uv run python src/utils/check_models.py --force --json report.json
+```
+
+| Verdict | Meaning |
+|---|---|
+| `REAL-TIME` | RTF ≤ 0.5: comfortable for live streaming |
+| `BORDERLINE` | RTF ≤ 1.0: keeps up on one stream with little headroom |
+| `OFFLINE ONLY` | RTF > 1.0: fine for files, too slow for live calls |
+| `NOT DOWNLOADED` / `MISSING DEPS` | files or Python packages missing (the note shows the fix) |
+| `TOO BIG` / `OUT OF MEMORY` / `TIMEOUT` | does not fit in the free RAM, or did not finish in `--timeout` |
+| `NO OUTPUT` / `ERROR` | the model loaded or crashed but gave no usable transcript |
+
+It ends with a recommendation (best accuracy that still runs in real time,
+fastest, lightest on RAM) and the exact `default_model` line to put in
+`config/config.yaml`. Close other heavy apps first, since the check uses the RAM
+that is free at that moment.
 
 ---
 
@@ -241,7 +289,7 @@ in the UI; the browser resamples it to 16 kHz mono before streaming.
 Pick the model served by the live UI in `config/config.yaml`:
 
 ```yaml
-default_model: "qwen3_onnx"    # or "qwen3_0.6b", "qwen3_1.7b", "whisper_int8_tiny", ...
+default_model: "qwen3_onnx_0.6b_int8"    # or "qwen3_0.6b", "qwen3_1.7b", "whisper_int8_tiny", ...
 ```
 
 or override it for one run without editing the file:
@@ -256,7 +304,7 @@ The name is resolved through `config/models/models.yaml` to a per-model YAML
 
 - The repo currently ships with `default_model: "whisper_int8_tiny"`. Qwen3-1.7B
   ran slower than real time on an 8-core CPU in our benchmark (RTF ≈ 1.0–1.5); use
-  `qwen3_onnx` or `whisper_int8_tiny` for a smooth live demo.
+  `qwen3_onnx_0.6b_int8` or `whisper_int8_tiny` for a smooth live demo.
 - `whisper_*` entries are served with **sliding-window streaming**: the window
   is re-transcribed every `hop_s`, text confirmed by two consecutive passes
   (LocalAgreement-2) is shown as final and the rest as dimmed tentative text. Tune
@@ -297,21 +345,36 @@ The model loads at startup (a few seconds for ONNX). `GET /api/health` reports
 uv run python benchmark/run_benchmark.py
 
 # Fast run: ONNX only, no accuracy, 1 run
-uv run python benchmark/run_benchmark.py --models onnx_int8 --runs 1 --legs 1,2 --skip-accuracy
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b --runs 1 --legs 1,2 --skip-accuracy
 
 # ONNX vs Transformers 0.6B
-uv run python benchmark/run_benchmark.py --models onnx_int8,transformers_bf16_0.6b --runs 3
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,qwen3_transformers_bf16_0.6b --runs 3
 
 # Qwen3 ONNX vs Whisper INT8 small
-uv run python benchmark/run_benchmark.py --models onnx_int8,whisper_int8_small
+uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_small
 ```
 
-Config ids: `onnx_int8`, `transformers_bf16_0.6b`, `transformers_bf16_1.7b`,
+Config ids: `qwen3_onnx_int8_0.6b`, `qwen3_onnx_fp32_0.6b`, `qwen3_onnx_int4_0.6b`, `qwen3_onnx_fp32_1.7b`
+(disabled by default), `qwen3_onnx_int4_1.7b` (all but the first need their models downloaded first),
+`qwen3_transformers_bf16_0.6b`, `qwen3_transformers_bf16_1.7b`,
 `whisper_int8_tiny`, `whisper_int8_base`, `whisper_int8_small`,
 `whisper_int8_medium`. Reports are written to
 `benchmark/results/<UTC timestamp>_raw.json` and `_summary.md`. See
 [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) for what each
 stage measures and how to read the results.
+
+**Disable / enable a config.** Add `enabled: false` to its entry in
+`benchmark/configs/bench_config.yaml` to skip it in default runs (omit the key or
+set `true` to enable). Example, as shipped for the 1.7B FP32 model (~10 GB, too
+large for some machines):
+
+```yaml
+  - id: "qwen3_onnx_fp32_1.7b"
+    enabled: false          # set true (or remove this line) to include it again
+```
+
+A disabled config can still be run once by naming it:
+`uv run python benchmark/run_benchmark.py --models qwen3_onnx_fp32_1.7b --runs 1`.
 
 Sample results from `benchmark/results/20261004T095157Z_summary.md` (8 physical
 / 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s):

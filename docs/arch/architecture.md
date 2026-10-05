@@ -280,7 +280,7 @@ engine.transcribe_stream(audio_array, language=None) -> Generator[tuple[str, dic
 
 | Engine | Runtime | What `transcribe_stream` yields |
 |---|---|---|
-| `ONNXQwen3ASR` (`qwen3_onnx`) | ONNX Runtime, INT8 decoder, no PyTorch | True token-level deltas from the greedy decode loop; timing has mel / encoder / prepare / prefill / decode |
+| `ONNXQwen3ASR` (`qwen3_onnx_0.6b_int8`, `qwen3_onnx_{0.6b,1.7b}_{fp32,int4}`) | ONNX Runtime (INT8 / INT4 / FP32), no PyTorch | True token-level deltas from the greedy decode loop; timing has mel / encoder / prepare / prefill / decode |
 | `Qwen3ASR` (`qwen3_0.6b`, `qwen3_1.7b`) | `qwen-asr` package on PyTorch, BF16 | One delta with the full text (the library call is blocking), then timing |
 | `WhisperOnnxEngine` (`whisper_*`) | ONNX Runtime + vendored `src/whisper` decoding | One delta per Whisper segment after the full pass, then timing |
 
@@ -290,6 +290,11 @@ Qwen3 ONNX pipeline:
 16 kHz wav → 128-bin log-mel → encoder_conv (100-frame chunks) → encoder_transformer
           → audio features replace <|audio_pad|> tokens in the chat prompt embeddings
           → decoder_init (prefill, KV cache) → decoder_step loop (greedy) → tokenizer.decode
+
+Fused layout (andrewleech exports, FP32 / INT4; auto-detected from the files in onnx_dir):
+16 kHz wav → 128-bin log-mel (last STFT frame dropped) → encoder[.int4].onnx (single graph)
+          → decoder_init[.int4].onnx (input_ids + audio_features + audio_offset)
+          → decoder_step[.int4].onnx loop (greedy) → tokenizer.decode
 ```
 
 Whisper ONNX pipeline:

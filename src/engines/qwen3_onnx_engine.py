@@ -1,5 +1,5 @@
 """
-Qwen3-ASR-0.6B — Pure ONNX Inference Pipeline.
+Qwen3-ASR — Pure ONNX Inference Pipeline (0.6B and 1.7B).
 
 No PyTorch dependency. Uses only ONNX Runtime + NumPy + librosa.
 
@@ -8,11 +8,29 @@ Architecture:
     Prompt tokens → Embed (numpy) → Replace audio placeholders → Decoder Init (ONNX) → Logits + KV Cache
     Greedy decode loop: Decoder Step (ONNX) → next token until EOS
 
+Two on-disk model layouts are supported; the layout is auto-detected from the
+files present in ``onnx_dir``:
+
+  "split" (legacy, Daumee/Qwen3-ASR-0.6B-ONNX-CPU, INT8 decoder)
+      encoder_conv.onnx + encoder_transformer.onnx, decoder_{init,step}[.int8].onnx,
+      embed_tokens.bin (FP32, 151936 x 1024).
+
+  "fused" (andrewleech/qwen3-asr-{0.6b,1.7b}-onnx, FP32 or INT4)
+      encoder[.int4].onnx (single graph, windowed internally),
+      decoder_{init,step}[.int4].onnx (+ decoder_weights[.int4].data),
+      embed_tokens.bin (FP16, shape/hidden size read from config.json).
+      decoder_init may take either ``input_embeds`` (v1) or
+      ``input_ids + audio_features + audio_offset`` (v3); both are handled.
+
+Precision is selected with ``quantize``: "fp32" | "int8" (split layout only) |
+"int4" (fused layout only).
+
 Usage:
-    python onnx_inference.py audio.wav
-    python onnx_inference.py audio1.wav audio2.wav --language Korean
+    python src/engines/qwen3_onnx_engine.py audio.wav
+    python src/engines/qwen3_onnx_engine.py audio.wav --config config/models/qwen3_onnx_0.6b_int4.yaml
 """
 
+import json
 import time
 from pathlib import Path
 from typing import Optional, Literal, Generator, Union
@@ -114,7 +132,10 @@ class SimpleTokenizer:
 # ── ONNX Pipeline ──────────────────────────────────────────────────────
 
 class OnnxAsrPipeline:
-    """End-to-end ASR pipeline using only ONNX Runtime."""
+    """End-to-end ASR pipeline using only ONNX Runtime (split or fused model layout)."""
+
+    # quantize value → filename suffix inserted before ".onnx" (e.g. decoder_init.int4.onnx)
+    _SUFFIX = {"fp32": "", "none": "", "int8": ".int8", "int4": ".int4"}
 
     def __init__(
         self,
@@ -127,11 +148,19 @@ class OnnxAsrPipeline:
         Args:
             onnx_dir:    Directory containing all ONNX model artefacts.
             num_threads: ORT intra-op thread count (0 = auto).
-            quantize:    Decoder precision: "int8" | "fp32".
+            quantize:    Model precision: "fp32" | "int8" | "int4".
+                         "int8" applies to the split layout's decoder only;
+                         "int4" applies to every graph of the fused layout.
+                         A missing quantised file falls back to the FP32 one.
             ort_session: Optional dict from the ``ort_session`` config section:
                          { graph_optimization_level, log_severity_level, providers }
         """
         onnx_path = Path(onnx_dir)
+        if not onnx_path.is_dir():
+            raise FileNotFoundError(
+                f"ONNX model directory '{onnx_path}' not found. "
+                "Download it first: python src/utils/download_utils.py --model <name>"
+            )
         ort_cfg = ort_session or {}
 
         sess_opts = ort.SessionOptions()
@@ -144,31 +173,46 @@ class OnnxAsrPipeline:
 
         providers = ort_cfg.get("providers", ["CPUExecutionProvider"])
 
-        # Choose decoder model files based on quantization
-        if quantize == "int8" and (onnx_path / "decoder_init.int8.onnx").exists():
-            decoder_init_path = "decoder_init.int8.onnx"
-            decoder_step_path = "decoder_step.int8.onnx"
-            print(f"Loading ONNX models (decoder: INT8)...")
+        quantize = (quantize or "fp32").lower()
+        if quantize not in self._SUFFIX:
+            raise ValueError(f"Unknown quantize '{quantize}'. Expected one of {list(self._SUFFIX)}.")
+        suffix = self._SUFFIX[quantize]
+
+        def pick(name: str) -> Path:
+            """Return {name}{suffix}.onnx if present, else {name}.onnx."""
+            if suffix:
+                quant_path = onnx_path / f"{name}{suffix}.onnx"
+                if quant_path.exists():
+                    return quant_path
+                print(f"  [warn] {quant_path.name} not found - falling back to {name}.onnx (FP32)")
+            return onnx_path / f"{name}.onnx"
+
+        def load(path: Path) -> ort.InferenceSession:
+            print(f"  {path.name}")
+            return ort.InferenceSession(str(path), sess_opts, providers=providers)
+
+        self.layout = "split" if (onnx_path / "encoder_conv.onnx").exists() else "fused"
+        print(f"Loading ONNX models (layout: {self.layout}, precision: {quantize.upper()})...")
+
+        if self.layout == "split":
+            # Legacy layout: only the decoder is quantised (INT8).
+            self.encoder_conv = load(onnx_path / "encoder_conv.onnx")
+            self.encoder_transformer = load(onnx_path / "encoder_transformer.onnx")
+            self.encoder = None
+            self.decoder_init = load(pick("decoder_init"))
+            self.decoder_step = load(pick("decoder_step"))
         else:
-            decoder_init_path = "decoder_init.onnx"
-            decoder_step_path = "decoder_step.onnx"
-            print(f"Loading ONNX models (decoder: FP32)...")
+            self.encoder = load(pick("encoder"))
+            self.encoder_conv = self.encoder_transformer = None
+            self.decoder_init = load(pick("decoder_init"))
+            self.decoder_step = load(pick("decoder_step"))
 
-        self.encoder_conv = ort.InferenceSession(
-            str(onnx_path / "encoder_conv.onnx"), sess_opts, providers=providers)
-        self.encoder_transformer = ort.InferenceSession(
-            str(onnx_path / "encoder_transformer.onnx"), sess_opts, providers=providers)
-        self.decoder_init = ort.InferenceSession(
-            str(onnx_path / decoder_init_path), sess_opts, providers=providers)
-        self.decoder_step = ort.InferenceSession(
-            str(onnx_path / decoder_step_path), sess_opts, providers=providers)
+        # v3 decoder_init takes token ids + audio features; v1 takes pre-fused embeds.
+        init_inputs = {i.name for i in self.decoder_init.get_inputs()}
+        self._init_takes_ids = "input_ids" in init_inputs
 
-        # Load embedding matrix
-        embed_path = onnx_path / "embed_tokens.bin"
-        print(f"Loading embeddings ({embed_path.stat().st_size / 1e6:.0f} MB)...")
-        self.embed_tokens = np.fromfile(
-            str(embed_path), dtype=np.float32
-        ).reshape(VOCAB_SIZE, HIDDEN_SIZE)
+        # Load embedding matrix (kept in its on-disk dtype; rows are cast to FP32 on lookup)
+        self.embed_tokens = self._load_embeddings(onnx_path)
 
         # Mel filterbank
         self.mel_filters = get_mel_filters()
@@ -181,8 +225,48 @@ class OnnxAsrPipeline:
 
         print("Pipeline ready.")
 
+    def _load_embeddings(self, onnx_path: Path) -> np.ndarray:
+        """Load embed_tokens.bin as [vocab, hidden] (FP32 for split layout, per config.json otherwise)."""
+        embed_path = onnx_path / "embed_tokens.bin"
+        print(f"Loading embeddings ({embed_path.stat().st_size / 1e6:.0f} MB)...")
+
+        cfg_path = onnx_path / "config.json"
+        if self.layout == "split" or not cfg_path.exists():
+            return np.fromfile(str(embed_path), dtype=np.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
+
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        dec = cfg.get("decoder", {})
+        shape = cfg.get("embed_tokens_shape") or [
+            dec.get("vocab_size", VOCAB_SIZE), dec.get("hidden_size", HIDDEN_SIZE)
+        ]
+        dtype = np.float16 if cfg.get("embed_tokens_dtype") == "float16" else np.float32
+        return np.fromfile(str(embed_path), dtype=dtype).reshape(shape)
+
+    def _embed_rows(self, ids) -> np.ndarray:
+        """Look up embedding rows and return them as a fresh FP32 array."""
+        return self.embed_tokens[ids].astype(np.float32)
+
+    def _compute_mel(self, wav: np.ndarray) -> np.ndarray:
+        """Log-mel spectrogram [n_mels, frames] matching the active encoder layout."""
+        mel = compute_mel_spectrogram(wav, self.mel_filters)
+        if self.layout == "fused":
+            # The fused encoder was exported against WhisperFeatureExtractor, which drops the
+            # last STFT frame.
+            mel = mel[:, :-1]
+        return mel
+
     def _encode_audio(self, mel: np.ndarray, mel_len: int) -> np.ndarray:
-        """Run encoder: mel → audio features [N, 1024]."""
+        """Run the encoder: mel → audio features [N, hidden]."""
+        if self.layout == "fused":
+            features = self.encoder.run(
+                ["audio_features"], {"mel": np.ascontiguousarray(mel[np.newaxis, :, :mel_len])}
+            )[0]
+            return features[0]  # [1, N, hidden] → [N, hidden]
+        return self._encode_audio_split(mel, mel_len)
+
+    def _encode_audio_split(self, mel: np.ndarray, mel_len: int) -> np.ndarray:
+        """Legacy encoder (conv + transformer graphs): mel → audio features [N, 1024]."""
         mel_valid = mel[:, :mel_len]
         chunk_num = int(np.ceil(mel_len / CHUNK_SIZE))
 
@@ -238,19 +322,49 @@ class OnnxAsrPipeline:
             ids += lang_tokens
         return ids
 
-    def _embed_and_fuse(self, token_ids: list, audio_features: np.ndarray) -> np.ndarray:
-        """Embed tokens and replace audio placeholders with encoder output."""
-        ids_array = np.array(token_ids)
-        embeds = self.embed_tokens[ids_array]  # [seq_len, 1024]
+    def _prepare_decoder_inputs(self, token_ids: list, audio_features: np.ndarray) -> dict:
+        """Build the decoder_init feed dict for the detected decoder format (v1 or v3)."""
+        ids_array = np.asarray(token_ids, dtype=np.int64)
+        audio_positions = np.where(ids_array == AUDIO_PAD_ID)[0]
+        if len(audio_positions) != audio_features.shape[0]:
+            raise ValueError(
+                f"Audio token count mismatch: {len(audio_positions)} vs {audio_features.shape[0]}"
+            )
+        position_ids = np.arange(len(ids_array), dtype=np.int64)[np.newaxis, :]
+        audio_features = audio_features.astype(np.float32, copy=False)
 
-        # Replace audio_pad positions
-        audio_mask = (ids_array == AUDIO_PAD_ID)
-        audio_positions = np.where(audio_mask)[0]
-        assert len(audio_positions) == audio_features.shape[0], \
-            f"Audio token count mismatch: {len(audio_positions)} vs {audio_features.shape[0]}"
+        if self._init_takes_ids:
+            # v3: the graph embeds the tokens itself and splices in the audio features.
+            return {
+                "input_ids": ids_array[np.newaxis, :],
+                "position_ids": position_ids,
+                "audio_features": audio_features[np.newaxis, :, :],
+                "audio_offset": np.array([audio_positions[0]], dtype=np.int64),
+            }
+
+        # v1: fuse embeddings and audio features here.
+        embeds = self._embed_rows(ids_array)  # [seq_len, hidden]
         embeds[audio_positions] = audio_features
+        return {"input_embeds": embeds[np.newaxis, :, :], "position_ids": position_ids}
 
-        return embeds[np.newaxis, :, :]  # [1, seq_len, 1024]
+    def _prefill(self, feeds: dict):
+        """Run decoder_init → (logits, present_keys, present_values)."""
+        logits, present_keys, present_values = self.decoder_init.run(
+            ["logits", "present_keys", "present_values"], feeds
+        )
+        return logits, present_keys, present_values
+
+    def _step(self, token: int, pos: int, past_keys: np.ndarray, past_values: np.ndarray):
+        """Run one decoder_step → (logits, present_keys, present_values)."""
+        return self.decoder_step.run(
+            ["logits", "present_keys", "present_values"],
+            {
+                "input_embeds": self._embed_rows(token)[np.newaxis, np.newaxis, :],
+                "position_ids": np.array([[pos]], dtype=np.int64),
+                "past_keys": past_keys,
+                "past_values": past_values,
+            },
+        )
 
     def _transcribe_chunk(
         self,
@@ -260,27 +374,32 @@ class OnnxAsrPipeline:
     ) -> dict:
         """Transcribe a single audio chunk (≤45s recommended)."""
         t0 = time.time()
-        mel = compute_mel_spectrogram(wav, self.mel_filters)
+        mel = self._compute_mel(wav)
         mel_len = mel.shape[1]
         t_mel = time.time() - t0
 
         t0 = time.time()
-        audio_features = self._encode_audio(mel, mel_len)
+        audio_features = self._encode_audio(mel, mel_len) if mel_len > 0 else np.zeros((0, 0), np.float32)
         num_audio_tokens = audio_features.shape[0]
         t_encoder = time.time() - t0
 
+        if num_audio_tokens == 0:  # audio too short to yield any encoder frame
+            return {
+                "text": "", "language": language or "", "raw_output": "",
+                "timing": {
+                    "mel_s": t_mel, "encoder_s": t_encoder, "prepare_s": 0.0,
+                    "prefill_s": 0.0, "decode_s": 0.0, "tokens_generated": 0,
+                },
+            }
+
         t0 = time.time()
         token_ids = self._build_prompt_ids(num_audio_tokens, language)
-        input_embeds = self._embed_and_fuse(token_ids, audio_features)
-        seq_len = input_embeds.shape[1]
-        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+        feeds = self._prepare_decoder_inputs(token_ids, audio_features)
+        seq_len = len(token_ids)
         t_prepare = time.time() - t0
 
         t0 = time.time()
-        logits, present_keys, present_values = self.decoder_init.run(None, {
-            "input_embeds": input_embeds,
-            "position_ids": position_ids,
-        })
+        logits, present_keys, present_values = self._prefill(feeds)
         t_prefill = time.time() - t0
 
         t0 = time.time()
@@ -292,15 +411,8 @@ class OnnxAsrPipeline:
             if next_token in (IM_END_ID, ENDOFTEXT_ID):
                 break
 
-            token_embed = self.embed_tokens[next_token][np.newaxis, np.newaxis, :]
-            pos = np.array([[cur_pos]], dtype=np.int64)
-
-            logits, present_keys, present_values = self.decoder_step.run(None, {
-                "input_embeds": token_embed,
-                "position_ids": pos,
-                "past_keys": present_keys,
-                "past_values": present_values,
-            })
+            logits, present_keys, present_values = self._step(
+                next_token, cur_pos, present_keys, present_values)
 
             next_token = int(np.argmax(logits[0, -1, :]))
             generated.append(next_token)
@@ -450,30 +562,36 @@ class OnnxAsrPipeline:
 
         # ── Mel spectrogram ────────────────────────────────────────────────
         t0 = time.time()
-        mel = compute_mel_spectrogram(wav, self.mel_filters)
+        mel = self._compute_mel(wav)
         mel_len = mel.shape[1]
         t_mel = time.time() - t0
 
         # ── Encoder ────────────────────────────────────────────────────────
         t0 = time.time()
-        audio_features = self._encode_audio(mel, mel_len)
+        audio_features = self._encode_audio(mel, mel_len) if mel_len > 0 else np.zeros((0, 0), np.float32)
         num_audio_tokens = audio_features.shape[0]
         t_encoder = time.time() - t0
 
-        # ── Prompt prep + embedding fuse ───────────────────────────────────
+        if num_audio_tokens == 0:  # audio too short to yield any encoder frame
+            t_total = time.time() - t_total_start
+            yield "", {
+                "mel_s": t_mel, "encoder_s": t_encoder, "prepare_s": 0.0,
+                "prefill_s": 0.0, "decode_s": 0.0, "tokens_generated": 0,
+                "total_s": t_total, "audio_duration_s": audio_duration_s,
+                "rtf": t_total / audio_duration_s if audio_duration_s > 0 else 0.0,
+            }
+            return
+
+        # ── Prompt prep (+ embedding fuse for v1 decoders) ─────────────────
         t0 = time.time()
         token_ids = self._build_prompt_ids(num_audio_tokens, language)
-        input_embeds = self._embed_and_fuse(token_ids, audio_features)
-        seq_len = input_embeds.shape[1]
-        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+        feeds = self._prepare_decoder_inputs(token_ids, audio_features)
+        seq_len = len(token_ids)
         t_prepare = time.time() - t0
 
         # ── Decoder prefill (KV-cache init) ────────────────────────────────
         t0 = time.time()
-        logits, present_keys, present_values = self.decoder_init.run(None, {
-            "input_embeds": input_embeds,
-            "position_ids": position_ids,
-        })
+        logits, present_keys, present_values = self._prefill(feeds)
         t_prefill = time.time() - t0
 
         # ── Greedy decode loop ─────────────────────────────────────────────
@@ -502,15 +620,8 @@ class OnnxAsrPipeline:
                 yield delta, None  # text delta; timing not yet available
                 printed_text = asr_text
 
-            token_embed = self.embed_tokens[next_token][np.newaxis, np.newaxis, :]
-            pos = np.array([[cur_pos]], dtype=np.int64)
-
-            logits, present_keys, present_values = self.decoder_step.run(None, {
-                "input_embeds": token_embed,
-                "position_ids": pos,
-                "past_keys": present_keys,
-                "past_values": present_values,
-            })
+            logits, present_keys, present_values = self._step(
+                next_token, cur_pos, present_keys, present_values)
 
             next_token = int(np.argmax(logits[0, -1, :]))
             cur_pos += 1
@@ -535,7 +646,7 @@ class OnnxAsrPipeline:
 
 class ONNXQwen3ASR:
     """
-    ONNX Runtime ASR engine for Qwen3-ASR-0.6B.
+    ONNX Runtime ASR engine for Qwen3-ASR (0.6B / 1.7B; FP32, INT8 or INT4).
 
     Can be instantiated directly with keyword arguments or via
     :meth:`from_config` / :meth:`from_config_path` to load all settings
@@ -546,7 +657,7 @@ class ONNXQwen3ASR:
         self,
         onnx_dir: str = "models/qwen3-asr-onnx-0.6b-int8",
         num_threads: int = 0,
-        quantize: Literal["int8", "fp32"] = "int8",
+        quantize: Literal["int8", "int4", "fp32"] = "int8",
         language: Optional[str] = None,
         ort_session: dict | None = None,
         # inference defaults (read from config, overridable per-call)
@@ -571,7 +682,7 @@ class ONNXQwen3ASR:
     def from_config(cls, cfg: dict) -> "ONNXQwen3ASR":
         """
         Build an ONNXQwen3ASR instance from a pre-loaded model config dict
-        (the contents of e.g. config/models/qwen3_onnx.yaml).
+        (the contents of e.g. config/models/qwen3_onnx_0.6b_int8.yaml).
 
         Args:
             cfg: Dict loaded from the per-model YAML.
@@ -600,7 +711,7 @@ class ONNXQwen3ASR:
 
         Args:
             config_path: Path to the per-model YAML,
-                         e.g. ``"config/models/qwen3_onnx.yaml"``.
+                         e.g. ``"config/models/qwen3_onnx_0.6b_int8.yaml"``.
 
         Returns:
             Configured ONNXQwen3ASR instance.
@@ -648,88 +759,60 @@ class ONNXQwen3ASR:
 
 # ── CLI ─────────────────────────────────────────────────────────────────
 
-# def main():
-#     import argparse
-#     parser = argparse.ArgumentParser(description="Qwen3-ASR Pure ONNX Inference")
-#     parser.add_argument("audio", nargs="+", help="Audio file(s)")
-#     parser.add_argument("--language", type=str, default=None)
-#     parser.add_argument("--onnx-dir", type=str, default="models/qwen3-asr-onnx-0.6b-int8")
-#     parser.add_argument("--max-new-tokens", type=int, default=512)
-#     parser.add_argument("--quantize", type=str, default="int8", choices=["none", "int8"],
-#                         help="Decoder quantization: none (FP32) or int8 (default)")
-#     parser.add_argument("--chunk-sec", type=int, default=30,
-#                         help="Target chunk length for long audio splitting (default: 30)")
-#     parser.add_argument("--threads", type=int, default=0, help="Number of threads (0=all)")
-#     args = parser.parse_args()
+def main():
+    import argparse
+    import sys
 
-#     pipeline = OnnxAsrPipeline(onnx_dir=args.onnx_dir, num_threads=args.threads,
-#                                quantize=args.quantize)
+    parser = argparse.ArgumentParser(description="Qwen3-ASR Pure ONNX Inference")
+    parser.add_argument("audio", nargs="+", help="Audio file(s)")
+    parser.add_argument("--config", default="config/models/qwen3_onnx_0.6b_int8.yaml",
+                        help="Per-model YAML (default: config/models/qwen3_onnx_0.6b_int8.yaml)")
+    parser.add_argument("--language", default=None, help="Force a language, e.g. English")
+    parser.add_argument("--onnx-dir", default=None, help="Override engine.onnx_dir from the config")
+    parser.add_argument("--quantize", default=None, choices=["fp32", "int8", "int4"],
+                        help="Override engine.quantize from the config")
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--stream", action="store_true", help="Print text deltas as they are decoded")
+    args = parser.parse_args()
 
-#     results = []
-#     for audio_path in args.audio:
-#         if not Path(audio_path).exists():
-#             print(f"File not found: {audio_path}", file=sys.stderr)
-#             continue
+    cfg = load_config(args.config)
+    if args.onnx_dir:
+        cfg.setdefault("engine", {})["onnx_dir"] = args.onnx_dir
+    if args.quantize:
+        cfg.setdefault("engine", {})["quantize"] = args.quantize
+    engine = ONNXQwen3ASR.from_config(cfg)
 
-#         result = pipeline.transcribe(
-#             audio_path, language=args.language,
-#             max_new_tokens=args.max_new_tokens,
-#             chunk_sec=args.chunk_sec,
-#         )
-#         results.append({
-#             "file": audio_path, "language": result["language"],
-#             "text": result["text"],
-#             "audio_duration_s": result["timing"]["audio_duration_s"],
-#             "processing_time_s": result["timing"]["total_s"],
-#             "rtf": result["timing"]["rtf"],
-#             })
-        
-#         t = result["timing"]
-#         print(f"\n[{audio_path}] ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
-#         if result["language"]:
-#             print(f"  Language: {result['language']}")
-#         print(f"  {result['text']}")
-#         print(f"  Encoder: {t['encoder_s']:.3f}s | Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | Tokens: {t['tokens_generated']}")
+    for audio_path in args.audio:
+        if not Path(audio_path).exists():
+            print(f"File not found: {audio_path}", file=sys.stderr)
+            continue
+
+        if args.stream:
+            print(f"\n[{audio_path}] ", end="", flush=True)
+            t = None
+            for delta, timing in engine.transcribe_stream(
+                audio_path, language=args.language, max_new_tokens=args.max_new_tokens
+            ):
+                if delta:
+                    sys.stdout.write(delta)
+                    sys.stdout.flush()
+                if timing is not None:
+                    t = timing
+            print()
+        else:
+            result = engine.transcribe(
+                audio_path, language=args.language, max_new_tokens=args.max_new_tokens
+            )
+            t = result["timing"]
+            print(f"\n[{audio_path}]")
+            if result["language"]:
+                print(f"  Language: {result['language']}")
+            print(f"  {result['text']}")
+
+        if t:
+            print(f"  ({t['audio_duration_s']:.1f}s audio, {t['total_s']:.2f}s, RTF {t['rtf']:.2f}x, "
+                  f"{t['tokens_generated']} tokens)")
 
 
 if __name__ == "__main__":
-    import sys
-
-    # ── Example 1: transcribe() — returns full result dict ─────────────────
-    qwen3_asr_engine = ONNXQwen3ASR()
-    result = qwen3_asr_engine.transcribe(
-        audio_path="test_audio/en/librispeech_0_1089_0.wav",
-        # language="English",
-    )
-    t = result["timing"]
-    print(f"\n[transcribe] ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
-    if result["language"]:
-        print(f"  Language: {result['language']}")
-    print(f"  {result['text']}")
-    print(f"  Mel: {t['mel_s']:.3f}s | Encoder: {t['encoder_s']:.3f}s | "
-          f"Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | "
-          f"Tokens: {t['tokens_generated']}")
-
-    # ── Example 2: transcribe_stream() — yields (delta, timing|None) tuples ─
-    engine = ONNXQwen3ASR(
-        language="English",
-        # language="Chinese",   # "zh" / "Mandarin" are accepted aliases
-        # language="Indonesian",
-    )
-
-    print("\n[transcribe_stream] ", end="", flush=True)
-    stream_timing = None
-    for delta, timing in engine.transcribe_stream("test_audio/cn/OSR_cn_000_0073_8k.wav"):
-        if delta:
-            sys.stdout.write(delta)
-            sys.stdout.flush()
-        if timing is not None:
-            stream_timing = timing
-
-    if stream_timing is not None:
-        t = stream_timing
-        print(f"\n  ({t['audio_duration_s']:.1f}s, RTF {t['rtf']:.2f}x)")
-        print(f"  Mel: {t['mel_s']:.3f}s | Encoder: {t['encoder_s']:.3f}s | "
-              f"Prefill: {t['prefill_s']:.3f}s | Decode: {t['decode_s']:.3f}s | "
-              f"Tokens: {t['tokens_generated']}")
-
+    main()

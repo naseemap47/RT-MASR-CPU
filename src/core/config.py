@@ -10,7 +10,7 @@ load_server_config(config_path)
     Load config/config.yaml and return the full top-level dict.
 
 load_model_registry(registry_path)
-    Load the model registry YAML (config/models/qwen3.yaml) and
+    Load the model registry YAML (config/models/models.yaml) and
     return the list of model entries.
 
 resolve_model_config(config_path, model_name)
@@ -62,7 +62,7 @@ def load_server_config(config_path: str = "config/config.yaml") -> dict[str, Any
         {
             "server":         { "host": ..., "port": ..., "log_level": ... },
             "default_model":  "qwen3_onnx",
-            "model_registry": "config/models/qwen3.yaml",
+            "model_registry": "config/models/models.yaml",
             "default_pipeline": "streaming_pcm",
         }
     """
@@ -73,7 +73,7 @@ def load_server_config(config_path: str = "config/config.yaml") -> dict[str, Any
 
 def load_model_registry(registry_path: str) -> list[dict[str, Any]]:
     """
-    Load the model registry YAML (config/models/qwen3.yaml).
+    Load the model registry YAML (config/models/models.yaml).
 
     Returns the list under the ``models`` key:
         [

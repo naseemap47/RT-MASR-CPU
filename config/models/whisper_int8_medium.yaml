@@ -1,0 +1,41 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# config/models/whisper_int8_medium.yaml
+#
+# Whisper medium — ONNX INT8 backend (fastest on CPU, smallest files)
+#   Engine  : WhisperOnnxEngine  (src/engines/whisper_engine.py)
+#   Source  : PINTO model-zoo, Wasabi S3 (INT8 dynamic-range quantised)
+#   Local   : models/whisper_int8   (shared by all INT8 sizes)
+#   Files   : medium_encoder_11_int8.onnx, medium_decoder_11_int8.onnx
+#   Download: DownloadModels().download_whisper(target_dir="models/whisper_int8", precision="int8")
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "whisper_int8_medium"
+display_name: "Whisper medium INT8 (ONNX / CPU)"
+backend: "whisper"               # → loads src/engines/whisper_engine.py :: WhisperOnnxEngine
+
+download:
+  method: "whisper"              # uses DownloadModels.download_whisper()
+  target_dir: "models/whisper_int8"
+  precision: "int8"
+
+engine:
+  model_name: "medium"
+  model_dir: "models/whisper_int8"
+  precision: "int8"
+  num_threads: 0                 # 0 = let ORT use all logical cores; set >0 to cap CPU usage
+  language: null                 # null = auto-detect; "en" | "fr" | "zh" | etc.
+  graph_opt: "all"               # none | basic | extended | all
+
+inference:
+  beam_size: 5
+  temperature: 0.0
+
+audio:
+  sample_rate: 16000
+  chunk_length_sec: 30
+
+ort_session:
+  graph_optimization_level: "all"
+  log_severity_level: 3
+  providers:
+    - "CPUExecutionProvider"

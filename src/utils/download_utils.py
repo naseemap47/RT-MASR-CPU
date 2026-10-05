@@ -1,10 +1,10 @@
 """
-Model Downloader for Qwen3-ASR backends.
+Model Downloader for RT-MASR backends.
 
 Downloads model files from HuggingFace Hub using settings read directly
 from the config YAML files.
 
-Two download strategies (selected via download.method in the model YAML):
+Three download strategies (selected via download.method in the model YAML):
 
   "onnx"     — DownloadModels.download_onnx()
       Fetches only onnx_models/* + tokenizer.json from the ONNX repo,
@@ -14,12 +14,17 @@ Two download strategies (selected via download.method in the model YAML):
       Full snapshot_download() of a HuggingFace repo into a local dir.
       Used for Transformers (safetensors) model weights.
 
+  "whisper"  — DownloadModels.download_whisper()
+      Downloads Whisper ONNX model tarballs from Wasabi/S3 for a given
+      precision (int8 | fp16 | fp32), extracts them into target_dir.
+
 Config-driven entrypoint
 ------------------------
     downloader = DownloadModels()
     downloader.download_from_config("config/models/qwen3_onnx.yaml")
     downloader.download_from_config("config/models/qwen3_0.6b.yaml")
     downloader.download_from_config("config/models/qwen3_1.7b.yaml")
+    downloader.download_from_config("config/models/whisper_onnx.yaml")
 
 Or to download all registered models in one call:
     downloader.download_all("config/config.yaml")
@@ -28,6 +33,7 @@ Or to download all registered models in one call:
 from __future__ import annotations
 
 import os
+import subprocess
 import shutil
 import tempfile
 from pathlib import Path
@@ -48,7 +54,7 @@ def _move_files(src: Path, dst: Path) -> None:
 # ── Downloader ────────────────────────────────────────────────────────────────
 
 class DownloadModels:
-    """Download Qwen3-ASR model weights from HuggingFace Hub."""
+    """Download RT-MASR model weights (Qwen3-ASR and Whisper ONNX) from remote sources."""
 
     # ------------------------------------------------------------------
     # Low-level strategies
@@ -191,10 +197,16 @@ class DownloadModels:
                 local_dir=dl["local_dir"],
                 force=force,
             )
+        elif method == "whisper":
+            return self.download_whisper(
+                target_dir=dl["target_dir"],
+                precision=dl.get("precision", "int8"),
+                force=force,
+            )
         else:
             raise ValueError(
                 f"Unknown download method '{method}' in '{model_config_path}'. "
-                "Expected 'onnx' or 'snapshot'."
+                "Expected 'onnx', 'snapshot', or 'whisper'."
             )
 
     def download_all(
@@ -235,6 +247,61 @@ class DownloadModels:
         return results
 
     # ------------------------------------------------------------------
+    # Whisper ONNX downloader
+    # ------------------------------------------------------------------
+
+    # Tarball URLs per precision (PINTO model-zoo, Wasabi S3)
+    _WHISPER_URLS: dict = {
+        "int8": "https://s3.ap-northeast-2.wasabisys.com/pinto-model-zoo/381_Whisper/onnx/resources_dynamic_range_quant_int8.tar.gz",
+        "fp16": "https://s3.ap-northeast-2.wasabisys.com/pinto-model-zoo/381_Whisper/onnx/resources_float16.tar.gz",
+        "fp32": "https://s3.ap-northeast-2.wasabisys.com/pinto-model-zoo/381_Whisper/onnx/resources_float32.tar.gz",
+    }
+
+    def download_whisper(
+        self,
+        target_dir: str = "models/whisper_int8",
+        precision: str = "int8",
+        force: bool = False,
+    ) -> Path:
+        """
+        Download Whisper ONNX model files from the PINTO model-zoo (Wasabi S3).
+
+        The tarball is extracted flat into *target_dir*.
+
+        Args:
+            target_dir: Local destination directory.
+            precision:  One of ``"int8"``, ``"fp16"``, ``"fp32"``.
+            force:      Re-download even if the directory already contains files.
+
+        Returns:
+            Path to *target_dir*.
+        """
+        supported = list(self._WHISPER_URLS)
+        if precision not in supported:
+            raise ValueError(
+                f"Unknown Whisper precision '{precision}'. Supported: {supported}"
+            )
+
+        out_dir = Path(target_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if out_dir.exists() and any(out_dir.iterdir()) and not force:
+            print(f"Whisper ONNX ({precision}) files already present in '{out_dir}'.")
+            return out_dir
+
+        url = self._WHISPER_URLS[precision]
+        tar_file = out_dir.parent / f"whisper_{precision}.tar.gz"
+
+        print(f"Downloading Whisper ONNX ({precision}) from '{url}' …")
+        subprocess.run(["curl", "-L", url, "-o", str(tar_file)], check=True)
+        print(f"Extracting to '{out_dir}' …")
+        subprocess.run(["tar", "-zxvf", str(tar_file), "-C", str(out_dir)], check=True)
+        tar_file.unlink(missing_ok=True)
+
+        print(f"Whisper ONNX ({precision}) ready in '{out_dir}'.")
+        return out_dir
+
+    # ------------------------------------------------------------------
     # Legacy low-level methods (kept for backward compatibility)
     # ------------------------------------------------------------------
 
@@ -262,14 +329,16 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Download Qwen3-ASR model weights from HuggingFace Hub."
+        description="Download RT-MASR model weights (Qwen3-ASR and Whisper ONNX)."
     )
     parser.add_argument(
         "--model",
         default=None,
         help=(
             "Name of a single model to download (must match a registry entry, "
-            "e.g. 'qwen3_onnx', 'qwen3_0.6b', 'qwen3_1.7b'). "
+            "e.g. 'qwen3_onnx', 'qwen3_0.6b', 'qwen3_1.7b', "
+            "'whisper_int8_tiny|base|small|medium', 'whisper_fp16', 'whisper_fp32'; "
+            "the alias 'whisper_int8' downloads all INT8 sizes). "
             "If omitted, all models in the registry are downloaded."
         ),
     )
@@ -287,7 +356,26 @@ if __name__ == "__main__":
 
     downloader = DownloadModels()
 
-    if args.model:
+    # Shorthand whisper aliases — dash and underscore forms both accepted.
+    # Note: whisper_int8 / fp16 / fp32 are also full registry entries, so they
+    # will be resolved via the registry path below. The aliases here act as a
+    # fast-path that bypasses registry lookup for convenience.
+    _WHISPER_ALIASES = {
+        "whisper-int8": "int8",
+        "whisper-fp16": "fp16",
+        "whisper-fp32": "fp32",
+        "whisper_int8": "int8",
+        "whisper_fp16": "fp16",
+        "whisper_fp32": "fp32",
+    }
+    if args.model in _WHISPER_ALIASES:
+        precision = _WHISPER_ALIASES[args.model]
+        downloader.download_whisper(
+            target_dir=f"models/whisper_{precision}",
+            precision=precision,
+            force=args.force,
+        )
+    elif args.model:
         # Resolve per-model config path from the registry
         server_cfg = load_server_config(args.config)
         cfg_dir = Path(args.config).parent.parent

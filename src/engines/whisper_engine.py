@@ -248,8 +248,14 @@ class _WhisperModelProxy:
         # Per-call accumulators (the proxy is created fresh for every transcribe()
         # call, so these are safe under concurrent calls on a shared pipeline).
         self.encoder_s: float = 0.0
-        self.decoder_s: float = 0.0
+        # Decoder time is split like the Qwen engine does:
+        #   prefill_s – decoder passes at KV offset 0: the prompt (SOT/language/task
+        #               tokens) that fills the KV cache, plus the language-id pass.
+        #   decode_s  – every later single-token step of the autoregressive loop.
+        self.prefill_s: float = 0.0
+        self.decoder_s: float = 0.0     # token-generation steps only (excludes prefill)
         self.decoder_calls: int = 0
+        self.prefill_calls: int = 0
 
         d = self._DimObj()
         for k, v in dims.items():
@@ -279,8 +285,13 @@ class _WhisperModelProxy:
         """Callable decoder shim for whisper.decoding.PyTorchInference.logits."""
         t0 = time.perf_counter()
         out = self._pipeline._decode_step(tokens, audio_features, kv_cache, offset)
-        self.decoder_s += time.perf_counter() - t0
-        self.decoder_calls += 1
+        dt = time.perf_counter() - t0
+        if offset == 0:
+            self.prefill_s += dt
+            self.prefill_calls += 1
+        else:
+            self.decoder_s += dt
+            self.decoder_calls += 1
         return out
 
     def logits(self, tokens: np.ndarray, audio_features: np.ndarray) -> np.ndarray:
@@ -576,9 +587,9 @@ class WhisperOnnxPipeline:
             "load_s":           t_load,
             "mel_s":            t_mel,
             "encoder_s":        proxy.encoder_s,            # sum of encoder ONNX runs
-            "prefill_s":        0.0,                        # n/a: Whisper has no separate prefill
-            "decode_s":         proxy.decoder_s,            # sum of decoder ONNX steps (incl. language id)
-            "other_s":          max(0.0, t_transcribe - proxy.encoder_s - proxy.decoder_s),  # beam search, tokenizer, python
+            "prefill_s":        proxy.prefill_s,            # decoder prompt pass(es) at KV offset 0 (+ language id)
+            "decode_s":         proxy.decoder_s,            # per-token decoder steps after the prefill
+            "other_s":          max(0.0, t_transcribe - proxy.encoder_s - proxy.prefill_s - proxy.decoder_s),  # beam search, tokenizer, python
             "tokens_generated": n_tokens,
             "total_s":          t_total,
             "audio_duration_s": audio_duration_s,
@@ -762,6 +773,15 @@ class WhisperOnnxEngine:
         Each completed Whisper segment is yielded as ``(text, None)`` as soon
         as it is decoded.  After all segments, a final ``("", timing)`` sentinel
         carries the full timing dict.
+
+        The timing dict mirrors ``ONNXQwen3ASR.transcribe_stream``:
+            mel_s       – log-mel spectrogram
+            encoder_s   – audio encoder runs
+            prefill_s   – decoder prompt pass(es) at KV offset 0 (SOT/language/task
+                          tokens that fill the KV cache, plus language detection)
+            decode_s    – per-token decoder steps after the prefill
+            other_s     – beam search / tokenizer / Python overhead
+            tokens_generated, total_s, audio_duration_s, rtf, segments
 
         Parameters
         ----------

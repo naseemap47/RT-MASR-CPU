@@ -324,3 +324,22 @@ def test_websocket_streams_whisper_tiny(monkeypatch):
     text = final["final_text"].lower()
     assert "yellow" in text and "lamps" in text
     assert final["metrics"]["stream_mode"] == "sliding_window"
+
+
+@pytest.mark.skipif(not os.path.exists(TINY), reason="whisper tiny int8 model not downloaded")
+def test_whisper_timing_reports_nonzero_prefill_and_consistent_stages():
+    import soundfile as sf
+    from src.engines.whisper_engine import WhisperOnnxEngine
+
+    eng = WhisperOnnxEngine(model_name="tiny", model_dir="models/whisper_int8", precision="int8")
+    wav, _ = sf.read("test_audio/en/librispeech_2_1089_2.wav", dtype="float32")
+
+    t = eng.transcribe(wav, language="en", beam_size=1, fallback=False)["timing"]
+    assert t["prefill_s"] > 0 and t["decode_s"] > 0 and t["encoder_s"] > 0
+    # stages are disjoint slices of the pass
+    stages = t["mel_s"] + t["encoder_s"] + t["prefill_s"] + t["decode_s"] + t["other_s"]
+    assert stages <= t["total_s"] + 0.05
+
+    # the streaming generator reports the same keys
+    final = [tm for _, tm in eng.transcribe_stream(wav, language="en") if tm][-1]
+    assert final["prefill_s"] > 0

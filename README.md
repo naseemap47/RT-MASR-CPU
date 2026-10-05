@@ -91,6 +91,9 @@ sequenceDiagram
     S-->>B: call_ended {final_text, metrics}
 ```
 
+New to this? Start with [`docs/how-streaming-works.md`](docs/how-streaming-works.md), a
+plain-language explanation of how each engine streams.
+
 Details (WebSocket protocol, chunking/VAD parameters, metric definitions and
 where each timestamp is captured, engine contract, known limitations) are in
 [`docs/arch/architecture.md`](docs/arch/architecture.md).

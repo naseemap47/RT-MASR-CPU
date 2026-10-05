@@ -180,7 +180,7 @@ def list_samples():
                 lang_name = "English"
             elif parent_name in ("cn", "zh"):
                 lang_code = "zh"
-                lang_name = "Mandarin Chinese"
+                lang_name = "Chinese"
             elif parent_name == "id":
                 lang_code = "id"
                 lang_name = "Bahasa Indonesia"

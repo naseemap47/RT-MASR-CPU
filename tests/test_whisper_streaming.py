@@ -362,3 +362,25 @@ def test_qwen_transformers_stage_timing_is_measured():
     assert abs(t["encoder_s"] / t["total_s"] - 0.55) > 0.01
     assert t["mel_s"] + t["encoder_s"] + t["prefill_s"] + t["decode_s"] <= t["total_s"] + 0.05
     assert t["tokens_generated"] > 5
+
+
+def test_qwen_transformers_language_names_are_accepted_by_qwen_asr():
+    """'zh' used to map to 'Mandarin', which qwen_asr rejects (ValueError) -> Chinese calls crashed."""
+    from qwen_asr.inference.utils import SUPPORTED_LANGUAGES, validate_language
+    from src.engines.qwen3_engine import normalize_language
+
+    for code in ("en", "zh", "cn", "id", "Chinese", "mandarin", "indonesian"):
+        validate_language(normalize_language(code))
+    assert normalize_language("zh") == "Chinese" and "Chinese" in SUPPORTED_LANGUAGES
+
+
+def test_chinese_and_mandarin_are_the_same_language_in_both_qwen_engines():
+    """'Chinese' and 'Mandarin' are one language; both engines normalise to the canonical 'Chinese'."""
+    import importlib
+    onnx = importlib.import_module("src.engines.qwen3_onnx_engine")
+    hf = importlib.import_module("src.engines.qwen3_engine")
+    for alias in ("zh", "cn", "ZH", "Mandarin", "mandarin chinese", "Chinese", " chinese "):
+        assert onnx.normalize_language(alias) == "Chinese"
+        assert hf.normalize_language(alias) == "Chinese"
+    assert onnx.LANGUAGE_MAP.keys() == hf.LANGUAGE_MAP.keys()
+    assert onnx.LANGUAGE_MAP == hf.LANGUAGE_MAP

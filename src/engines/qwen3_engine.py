@@ -72,11 +72,14 @@ MIN_CHUNK_SAMPLES = int(0.5 * SAMPLE_RATE)   # library minimum: 0.5 s
 LANGUAGE_MAP: dict[str, str] = {
     "en": "English",
     "english": "English",
-    "zh": "Mandarin",
-    "cn": "Mandarin",
-    "mandarin": "Mandarin",
-    "mandarin chinese": "Mandarin",
-    "chinese": "Mandarin",
+    # qwen_asr validates against its own list (SUPPORTED_LANGUAGES) which contains
+    # "Chinese", not "Mandarin"; the ONNX engine's prompt uses "Mandarin" but this
+    # backend goes through qwen_asr, so it must use the canonical name.
+    "zh": "Chinese",
+    "cn": "Chinese",
+    "mandarin": "Chinese",
+    "mandarin chinese": "Chinese",
+    "chinese": "Chinese",
     "id": "Indonesian",
     "indonesian": "Indonesian",
     "bahasa indonesia": "Indonesian",

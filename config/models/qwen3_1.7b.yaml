@@ -28,7 +28,7 @@ engine:
   device_map: "cpu"
   max_inference_batch_size: 1
   max_new_tokens: 384            # larger model → longer output capacity
-  language: null                 # null = auto-detect; "English" | "Mandarin" | "Indonesian"
+  language: null                 # null = auto-detect; "English" | "Chinese" | "Indonesian"  (aliases en / zh / mandarin / id also work)
 
 inference:
   max_new_tokens: 384

@@ -62,11 +62,13 @@ HIDDEN_SIZE = 1024
 LANGUAGE_MAP = {
     "en": "English",
     "english": "English",
-    "zh": "Mandarin",
-    "cn": "Mandarin",
-    "mandarin": "Mandarin",
-    "mandarin chinese": "Mandarin",
-    "chinese": "Mandarin",
+    # "Chinese" is the canonical name (the model itself reports "language Chinese"
+    # when it auto-detects, and qwen_asr's supported list uses it). Mandarin is an alias.
+    "zh": "Chinese",
+    "cn": "Chinese",
+    "mandarin": "Chinese",
+    "mandarin chinese": "Chinese",
+    "chinese": "Chinese",
     "id": "Indonesian",
     "indonesian": "Indonesian",
     "bahasa indonesia": "Indonesian",
@@ -711,7 +713,7 @@ if __name__ == "__main__":
     # ── Example 2: transcribe_stream() — yields (delta, timing|None) tuples ─
     engine = ONNXQwen3ASR(
         language="English",
-        # language="Mandarin",
+        # language="Chinese",   # "zh" / "Mandarin" are accepted aliases
         # language="Indonesian",
     )
 

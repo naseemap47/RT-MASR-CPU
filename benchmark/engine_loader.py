@@ -10,7 +10,7 @@ Supports three backends:
 Each entry in bench_config.yaml["configs"] looks like:
     id: "onnx_int8"
     backend: "onnx"
-    model_config: "config/models/qwen3_onnx.yaml"
+    model_config: "config/models/qwen3_onnx_0.6b_int8.yaml"
 """
 from __future__ import annotations
 

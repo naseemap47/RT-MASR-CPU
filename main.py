@@ -17,10 +17,10 @@ instead we time sub-phases directly via the session.
 Backend selection
 -----------------
 The active inference backend is chosen by ``default_model`` in config/config.yaml:
-  "qwen3_onnx"   → ONNXQwen3ASR   (src/engines/qwen3_onnx_engine.py)
-  "qwen3_0.6b"   → Qwen3ASR 0.6B  (src/engines/qwen3_engine.py)
-  "qwen3_1.7b"   → Qwen3ASR 1.7B  (src/engines/qwen3_engine.py)
-  "whisper_*"    → WhisperOnnxEngine (src/engines/whisper_engine.py)
+  "qwen3_onnx_0.6b_int8" → ONNXQwen3ASR      (src/engines/qwen3_onnx_engine.py)
+  "qwen3_0.6b"           → Qwen3ASR 0.6B     (src/engines/qwen3_engine.py)
+  "qwen3_1.7b"           → Qwen3ASR 1.7B     (src/engines/qwen3_engine.py)
+  "whisper_*"            → WhisperOnnxEngine (src/engines/whisper_engine.py)
 Change the YAML key (or set the RT_MASR_MODEL environment variable) to switch
 backends without touching this file.
 

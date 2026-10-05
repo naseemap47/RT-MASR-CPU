@@ -8,7 +8,7 @@ configs:
   - id: "onnx_int8"
     display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
     backend: "onnx"
-    model_config: "config/models/qwen3_onnx.yaml"
+    model_config: "config/models/qwen3_onnx_0.6b_int8.yaml"
 
   - id: "transformers_bf16_0.6b"
     display_name: "Qwen3-ASR-0.6B BF16 (Transformers / CPU)"

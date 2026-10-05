@@ -38,7 +38,7 @@ flowchart LR
     end
 
     subgraph Engines["src/engines/"]
-        E1["ONNXQwen3ASR<br/>Qwen3-ASR-0.6B ONNX INT8"]
+        E1["ONNXQwen3ASR<br/>Qwen3-ASR 0.6B / 1.7B ONNX<br/>INT8 · INT4 · FP32"]
         E2["Qwen3ASR<br/>Transformers 0.6B / 1.7B"]
         E3["WhisperOnnxEngine<br/>+ sliding-window streamer"]
     end
@@ -181,7 +181,11 @@ Hugging Face token is needed.
 
 | Registry name | Backend | Source | Local directory | Size on disk |
 |---|---|---|---|---|
-| `qwen3_onnx` | `onnx` | HF [`Daumee/Qwen3-ASR-0.6B-ONNX-CPU`](https://huggingface.co/Daumee/Qwen3-ASR-0.6B-ONNX-CPU) | `models/qwen3-asr-onnx-0.6b-int8` | 2.5 GB |
+| `qwen3_onnx_0.6b_int8` | `onnx` | HF [`Daumee/Qwen3-ASR-0.6B-ONNX-CPU`](https://huggingface.co/Daumee/Qwen3-ASR-0.6B-ONNX-CPU) | `models/qwen3-asr-onnx-0.6b-int8` | 2.5 GB |
+| `qwen3_onnx_0.6b_fp32` | `onnx` | HF [`andrewleech/qwen3-asr-0.6b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx) (FP32 files) | `models/qwen3-asr-onnx-0.6b-fp32` | 4.1 GB |
+| `qwen3_onnx_0.6b_int4` | `onnx` | HF [`andrewleech/qwen3-asr-0.6b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx) (INT4 files) | `models/qwen3-asr-onnx-0.6b-int4` | 2.0 GB |
+| `qwen3_onnx_1.7b_fp32` | `onnx` | HF [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) (FP32 files) | `models/qwen3-asr-onnx-1.7b-fp32` | 10.0 GB |
+| `qwen3_onnx_1.7b_int4` | `onnx` | HF [`andrewleech/qwen3-asr-1.7b-onnx`](https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx) (INT4 files) | `models/qwen3-asr-onnx-1.7b-int4` | 4.1 GB |
 | `qwen3_0.6b` | `transformers` | HF [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | `models/qwen3-asr-0.6b` | 1.8 GB |
 | `qwen3_1.7b` | `transformers` | HF [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | `models/qwen3-asr-1.7b` | 4.4 GB |
 | `whisper_int8_{tiny,base,small,medium}` | `whisper` | PINTO model zoo, INT8 tarball | `models/whisper_int8` (shared) | 5.5 GB |
@@ -190,7 +194,13 @@ Hugging Face token is needed.
 
 ```bash
 # Recommended minimum for the live demo
-uv run python src/utils/download_utils.py --model qwen3_onnx
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int8
+
+# Fused-encoder ONNX exports: 0.6B / 1.7B, FP32 or INT4 (add --dry-run to list files first)
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int4
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_fp32
+uv run python src/utils/download_utils.py --model qwen3_onnx_1.7b_int4
+uv run python src/utils/download_utils.py --model qwen3_onnx_1.7b_fp32
 
 # Transformers variants (for comparison)
 uv run python src/utils/download_utils.py --model qwen3_0.6b
@@ -203,15 +213,17 @@ uv run python src/utils/download_utils.py --model whisper_int8
 uv run python src/utils/download_utils.py
 
 # Re-download even if files exist
-uv run python src/utils/download_utils.py --model qwen3_onnx --force
+uv run python src/utils/download_utils.py --model qwen3_onnx_0.6b_int8 --force
 ```
 
 A download is skipped when its target already looks complete (the required ONNX
-files for `qwen3_onnx`, a non-empty directory for the others). Expected files:
+files for `qwen3_onnx_0.6b_int8`, a non-empty directory for the others). Expected files:
 
 ```
 models/qwen3-asr-onnx-0.6b-int8/   decoder_init.int8.onnx  decoder_step.int8.onnx  embed_tokens.bin
                                    encoder_conv.onnx(.data)  encoder_transformer.onnx(.data)  tokenizer.json
+models/qwen3-asr-onnx-<size>-<prec>/   encoder[.int4].onnx  decoder_init[.int4].onnx  decoder_step[.int4].onnx
+                                       decoder_weights[.int4].data  embed_tokens.bin (FP16)  config.json  tokenizer.json  ...
 models/whisper_int8/               {tiny,base,small,medium}_{encoder,decoder}_11_int8.onnx  ...
 ```
 
@@ -241,7 +253,7 @@ in the UI; the browser resamples it to 16 kHz mono before streaming.
 Pick the model served by the live UI in `config/config.yaml`:
 
 ```yaml
-default_model: "qwen3_onnx"    # or "qwen3_0.6b", "qwen3_1.7b", "whisper_int8_tiny", ...
+default_model: "qwen3_onnx_0.6b_int8"    # or "qwen3_0.6b", "qwen3_1.7b", "whisper_int8_tiny", ...
 ```
 
 or override it for one run without editing the file:
@@ -256,7 +268,7 @@ The name is resolved through `config/models/models.yaml` to a per-model YAML
 
 - The repo currently ships with `default_model: "whisper_int8_tiny"`. Qwen3-1.7B
   ran slower than real time on an 8-core CPU in our benchmark (RTF ≈ 1.0–1.5); use
-  `qwen3_onnx` or `whisper_int8_tiny` for a smooth live demo.
+  `qwen3_onnx_0.6b_int8` or `whisper_int8_tiny` for a smooth live demo.
 - `whisper_*` entries are served with **sliding-window streaming**: the window
   is re-transcribed every `hop_s`, text confirmed by two consecutive passes
   (LocalAgreement-2) is shown as final and the rest as dimmed tentative text. Tune

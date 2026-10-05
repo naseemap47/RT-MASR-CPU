@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# config/models/qwen3_onnx.yaml
+# config/models/qwen3_onnx_0.6b_int8.yaml
 #
 # Qwen3-ASR-0.6B-ONNX  —  Pure ONNX Runtime backend (no PyTorch)
 #   Engine  : ONNXQwen3ASR  (src/engines/qwen3_onnx_engine.py)
@@ -13,7 +13,7 @@
 #   true token-streaming (character-by-character deltas), supports INT8 decoder.
 # ──────────────────────────────────────────────────────────────────────────────
 
-name: "qwen3_onnx"
+name: "qwen3_onnx_0.6b_int8"
 display_name: "Qwen3-ASR-0.6B INT8 (ONNX / CPU)"
 backend: "onnx"                  # → loads src/engines/qwen3_onnx_engine.py :: ONNXQwen3ASR
 

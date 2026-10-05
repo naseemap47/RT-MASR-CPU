@@ -14,6 +14,11 @@ Three download strategies (selected via download.method in the model YAML):
       Full snapshot_download() of a HuggingFace repo into a local dir.
       Used for Transformers (safetensors) model weights.
 
+  "hf_files" — DownloadModels.download_hf_files()
+      Downloads an explicit list of files from a HuggingFace repo straight into
+      target_dir and verifies their sizes. Used for the fused Qwen3-ASR ONNX
+      exports (andrewleech/qwen3-asr-{0.6b,1.7b}-onnx, FP32 / INT4).
+
   "whisper"  — DownloadModels.download_whisper()
       Downloads Whisper ONNX model tarballs from Wasabi/S3 for a given
       precision (int8 | fp16 | fp32), extracts them into target_dir.
@@ -21,10 +26,12 @@ Three download strategies (selected via download.method in the model YAML):
 Config-driven entrypoint
 ------------------------
     downloader = DownloadModels()
-    downloader.download_from_config("config/models/qwen3_onnx.yaml")
+    downloader.download_from_config("config/models/qwen3_onnx_0.6b_int8.yaml")
+    downloader.download_from_config("config/models/qwen3_onnx_0.6b_int4.yaml")
+    downloader.download_from_config("config/models/qwen3_onnx_1.7b_fp32.yaml")
     downloader.download_from_config("config/models/qwen3_0.6b.yaml")
     downloader.download_from_config("config/models/qwen3_1.7b.yaml")
-    downloader.download_from_config("config/models/whisper_onnx.yaml")
+    downloader.download_from_config("config/models/whisper_int8_tiny.yaml")
 
 Or to download all registered models in one call:
     downloader.download_all("config/config.yaml")
@@ -38,7 +45,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, snapshot_download
 
 from core.config import load_config, load_model_registry, load_server_config
 
@@ -118,6 +125,74 @@ class DownloadModels:
         print(f"ONNX model ready in '{out_dir}'.")
         return out_dir
 
+    def download_hf_files(
+        self,
+        repo_id: str,
+        target_dir: str,
+        files: list[str],
+        revision: str | None = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> Path:
+        """
+        Download an explicit list of files from a HuggingFace repo into *target_dir*.
+
+        Used for the fused Qwen3-ASR ONNX exports, where one repo holds several
+        precisions (FP32 / INT4) and each local directory only needs the files
+        for one of them. Every file is size-checked against the Hub metadata.
+
+        Args:
+            repo_id:    HuggingFace repository ID.
+            target_dir: Local destination directory.
+            files:      Repo-relative filenames to fetch.
+            revision:   Optional branch, tag or commit sha.
+            force:      Re-download even if all files are already present.
+            dry_run:    Only list the files and their sizes.
+
+        Returns:
+            Path to *target_dir*.
+        """
+        out_dir = Path(target_dir)
+        if not files:
+            raise ValueError("download_hf_files() needs a non-empty 'files' list.")
+
+        info = HfApi().model_info(repo_id, revision=revision, files_metadata=True)
+        sizes = {s.rfilename: s.size or 0 for s in info.siblings}
+        missing_remote = [f for f in files if f not in sizes]
+        if missing_remote:
+            raise FileNotFoundError(f"Files not found in {repo_id}: {missing_remote}")
+
+        def _complete(f: str) -> bool:
+            local = out_dir / f
+            return local.exists() and local.stat().st_size == sizes[f]
+
+        if not dry_run and not force and all(_complete(f) for f in files):
+            print(f"All required files already present in '{out_dir}'.")
+            return out_dir
+
+        print(f"Repo:   {repo_id} @ {info.sha}")
+        print(f"Output: {out_dir}")
+        for f in files:
+            print(f"  {f:34s} {sizes[f] / 1e6:10.1f} MB")
+        print(f"  {'total':34s} {sum(sizes[f] for f in files) / 1e9:10.2f} GB")
+        if dry_run:
+            return out_dir
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=repo_id,
+            revision=info.sha,
+            allow_patterns=files,
+            local_dir=str(out_dir),
+            force_download=force,
+        )
+
+        bad = [f for f in files if not _complete(f)]
+        if bad:
+            raise RuntimeError(f"Download incomplete or size mismatch in '{out_dir}': {bad}")
+        print(f"Model ready in '{out_dir}'.")
+        return out_dir
+
     def download_snapshot(
         self,
         repo_id: str,
@@ -155,6 +230,7 @@ class DownloadModels:
         self,
         model_config_path: str,
         force: bool = False,
+        dry_run: bool = False,
     ) -> Path:
         """
         Download a model using settings from its per-model YAML file.
@@ -165,8 +241,10 @@ class DownloadModels:
 
         Args:
             model_config_path: Path to a per-model config YAML, e.g.
-                               ``"config/models/qwen3_onnx.yaml"``.
+                               ``"config/models/qwen3_onnx_0.6b_int8.yaml"``.
             force:             Force re-download.
+            dry_run:           List the files that would be fetched (``hf_files``
+                               method only; other methods ignore it).
 
         Returns:
             Path to the downloaded model directory.
@@ -174,7 +252,7 @@ class DownloadModels:
         Example::
 
             downloader = DownloadModels()
-            downloader.download_from_config("config/models/qwen3_onnx.yaml")
+            downloader.download_from_config("config/models/qwen3_onnx_0.6b_int8.yaml")
             downloader.download_from_config("config/models/qwen3_0.6b.yaml")
         """
         cfg = load_config(model_config_path)
@@ -191,6 +269,15 @@ class DownloadModels:
                 required_files=dl.get("required_files"),
                 force=force,
             )
+        elif method == "hf_files":
+            return self.download_hf_files(
+                repo_id=dl["repo_id"],
+                target_dir=dl["target_dir"],
+                files=dl["files"],
+                revision=dl.get("revision"),
+                force=force,
+                dry_run=dry_run,
+            )
         elif method == "snapshot":
             return self.download_snapshot(
                 repo_id=dl["repo_id"],
@@ -206,13 +293,14 @@ class DownloadModels:
         else:
             raise ValueError(
                 f"Unknown download method '{method}' in '{model_config_path}'. "
-                "Expected 'onnx', 'snapshot', or 'whisper'."
+                "Expected 'onnx', 'hf_files', 'snapshot', or 'whisper'."
             )
 
     def download_all(
         self,
         config_path: str = "config/config.yaml",
         force: bool = False,
+        dry_run: bool = False,
     ) -> dict[str, Path]:
         """
         Download every model listed in the model registry.
@@ -223,6 +311,7 @@ class DownloadModels:
         Args:
             config_path: Path to the top-level config.yaml.
             force:       Force re-download for all models.
+            dry_run:     List files instead of downloading (``hf_files`` models only).
 
         Returns:
             Dict mapping model name → downloaded directory path.
@@ -239,7 +328,7 @@ class DownloadModels:
             model_name = entry["name"]
             model_cfg_path = cfg_dir / entry["config"]
             try:
-                path = self.download_from_config(str(model_cfg_path), force=force)
+                path = self.download_from_config(str(model_cfg_path), force=force, dry_run=dry_run)
                 results[model_name] = path
             except Exception as exc:
                 print(f"  [ERROR] Failed to download '{model_name}': {exc}")
@@ -336,7 +425,8 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Name of a single model to download (must match a registry entry, "
-            "e.g. 'qwen3_onnx', 'qwen3_0.6b', 'qwen3_1.7b', "
+            "e.g. 'qwen3_onnx_0.6b_int8', 'qwen3_onnx_0.6b_fp32', 'qwen3_onnx_0.6b_int4', "
+            "'qwen3_onnx_1.7b_fp32', 'qwen3_onnx_1.7b_int4', 'qwen3_0.6b', 'qwen3_1.7b', "
             "'whisper_int8_tiny|base|small|medium', 'whisper_fp16', 'whisper_fp32'; "
             "the alias 'whisper_int8' downloads all INT8 sizes). "
             "If omitted, all models in the registry are downloaded."
@@ -351,6 +441,11 @@ if __name__ == "__main__":
         "--force",
         action="store_true",
         help="Force re-download even if model files already exist.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List files and sizes without downloading (Qwen3 ONNX 'hf_files' models only).",
     )
     args = parser.parse_args()
 
@@ -389,6 +484,6 @@ if __name__ == "__main__":
                 f"Unknown model '{args.model}'. Available: {available}"
             )
         model_cfg_path = cfg_dir / entry["config"]
-        downloader.download_from_config(str(model_cfg_path), force=args.force)
+        downloader.download_from_config(str(model_cfg_path), force=args.force, dry_run=args.dry_run)
     else:
-        downloader.download_all(config_path=args.config, force=args.force)
+        downloader.download_all(config_path=args.config, force=args.force, dry_run=args.dry_run)

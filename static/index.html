@@ -107,7 +107,13 @@
           <div class="proc-telemetry" id="proc-telemetry">
             <div class="proc-row"><span class="proc-label">Process RSS</span><span class="proc-val" id="proc-rss">—</span></div>
             <div class="proc-row"><span class="proc-label">Threads</span><span class="proc-val" id="proc-threads">—</span></div>
-            <div class="proc-row"><span class="proc-label">CPU%</span><span class="proc-val" id="proc-cpu">—</span></div>
+            <div class="proc-row">
+              <span class="proc-label">CPU%
+                <span class="info-dot" id="proc-cpu-info" tabindex="0" role="note" aria-label="About CPU percent"
+                      data-tooltip="Per-core scale: 100% = one CPU core fully busy. The model runs on several cores at once, so values above 100% are normal.">i</span>
+              </span>
+              <span class="proc-val"><span id="proc-cpu">—</span><span class="proc-sub" id="proc-cpu-sub"></span></span>
+            </div>
           </div>
         </section>
       </aside>

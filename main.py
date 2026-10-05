@@ -38,6 +38,7 @@ import asyncio
 import json
 import time
 import psutil
+import threading
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -140,7 +141,14 @@ app = FastAPI(title="RT-MASR Live Voice-Call Simulation", lifespan=lifespan)
 
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    class _NoCacheStatic(StaticFiles):
+        """Always revalidate UI assets so edits to app.js / style.css show up on a normal reload."""
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+    app.mount("/static", _NoCacheStatic(directory=str(static_dir)), name="static")
 
 
 @app.get("/")
@@ -151,9 +159,44 @@ def get_ui():
     return JSONResponse({"message": "RT-MASR Web UI Server Ready"})
 
 
+# psutil's cpu_percent(interval=None) reports usage *since the previous call on the same
+# Process object*. A fresh Process per request therefore always returned 0.0, and a
+# poll-driven reading would average over whatever gap separated two requests (e.g. since
+# server start for the first one). So one long-lived Process is sampled by a small
+# background thread once per second and /api/health just returns the latest value.
+_PROC = psutil.Process(os.getpid())
+_cpu_latest = 0.0
+_cpu_sampler_started = False
+_cpu_sampler_lock = threading.Lock()
+
+
+def _cpu_sampler_loop() -> None:
+    global _cpu_latest
+    _PROC.cpu_percent(interval=None)            # prime: the first call is always 0.0
+    while True:
+        time.sleep(1.0)
+        try:
+            _cpu_latest = _PROC.cpu_percent(interval=None)
+        except psutil.Error:
+            pass
+
+
+def _ensure_cpu_sampler() -> None:
+    global _cpu_sampler_started
+    with _cpu_sampler_lock:
+        if not _cpu_sampler_started:
+            threading.Thread(target=_cpu_sampler_loop, daemon=True, name="cpu-sampler").start()
+            _cpu_sampler_started = True
+
+
+_ensure_cpu_sampler()      # start now (server start / reload), so values are ready before the first call
+
+
 @app.get("/api/health")
 def check_health():
-    proc = psutil.Process(os.getpid())
+    proc = _PROC
+    _ensure_cpu_sampler()      # no-op normally; covers the case of import-time start being skipped
+    cpu = round(_cpu_latest, 1)     # psutil scale: 100 % = one fully used core, so it can exceed 100 %
     mem_info = proc.memory_info()
     return JSONResponse({
         "status": "ok",
@@ -161,7 +204,8 @@ def check_health():
         "active_model": _active_model_name,
         "backend": _active_backend,
         "stream_mode": _stream_mode(),
-        "cpu_percent": proc.cpu_percent(interval=None),
+        "cpu_percent": cpu,
+        "cpu_cores": psutil.cpu_count(logical=True),   # the UI uses it to explain values above 100 %
         "rss_mb": round(mem_info.rss / 1_048_576, 1),
         "vms_mb": round(mem_info.vms / 1_048_576, 1),
         "num_threads": proc.num_threads(),

@@ -136,6 +136,25 @@ document.addEventListener("DOMContentLoaded", () => {
     transcriptBox.scrollTop = transcriptBox.scrollHeight;
   }
 
+  /* Process CPU% uses the per-core scale (like `top`): 100% = ONE core fully busy, so a
+     multi-threaded model can exceed 100%. The value stays raw; a compact "≈ N cores" tag
+     is added next to it and the full explanation lives in the (i) tooltip. */
+  const procCpuSub = document.getElementById("proc-cpu-sub");
+  function showCpu(data) {
+    if (data.cpu_percent === undefined) return;
+    const pct = Math.round(data.cpu_percent);
+    procCpu.textContent = `${pct}%`;
+    if (procCpuSub) {
+      procCpuSub.textContent = pct > 100 ? `≈ ${(data.cpu_percent / 100).toFixed(1)} cores` : "";
+    }
+    const info = document.getElementById("proc-cpu-info");
+    if (info && data.cpu_cores) {
+      info.dataset.tooltip = "Per-core scale: 100% = one CPU core fully busy. "
+        + "The model runs on several cores at once, so values above 100% are normal "
+        + `(max ${data.cpu_cores * 100}% on this ${data.cpu_cores}-core machine).`;
+    }
+  }
+
   /* ── Health polling ───────────────────────────────────── */
   function checkHealth() {
     fetch("/api/health")
@@ -154,22 +173,24 @@ document.addEventListener("DOMContentLoaded", () => {
         /* Process telemetry */
         if (data.rss_mb !== undefined)  procRss.textContent     = `${data.rss_mb} MB`;
         if (data.num_threads !== undefined) procThreads.textContent = data.num_threads;
-        if (data.cpu_percent !== undefined) procCpu.textContent  = `${data.cpu_percent}%`;
+        showCpu(data);
       })
       .catch(() => setTimeout(checkHealth, 3000));
   }
   checkHealth();
 
   /* Poll health for process telemetry while call is active */
+  function pollTelemetry() {
+    fetch("/api/health", { cache: "no-store" }).then(r => r.json()).then(data => {
+      if (data.rss_mb !== undefined)  procRss.textContent     = `${data.rss_mb} MB`;
+      if (data.num_threads !== undefined) procThreads.textContent = data.num_threads;
+      showCpu(data);
+    }).catch(() => {});
+  }
   function startHealthPolling() {
     if (healthInterval) clearInterval(healthInterval);
-    healthInterval = setInterval(() => {
-      fetch("/api/health").then(r => r.json()).then(data => {
-        if (data.rss_mb !== undefined)  procRss.textContent     = `${data.rss_mb} MB`;
-        if (data.num_threads !== undefined) procThreads.textContent = data.num_threads;
-        if (data.cpu_percent !== undefined) procCpu.textContent  = `${data.cpu_percent}%`;
-      }).catch(() => {});
-    }, 2000);
+    pollTelemetry();                                   // first reading immediately
+    healthInterval = setInterval(pollTelemetry, 1000); // then every second
   }
   function stopHealthPolling() {
     if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }

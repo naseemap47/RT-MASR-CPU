@@ -116,6 +116,7 @@ src/
   utils/
     audio_utils.py          Audio loading, mel spectrogram, silence splitting
     download_utils.py       Model downloader (CLI)
+    check_models.py         Self-test: which models run on this PC
   whisper/                  Vendored Whisper tokenizer/decoding (whisper-onnx-cpu)
 config/
   config.yaml               Server settings + default_model
@@ -226,6 +227,41 @@ models/qwen3-asr-onnx-<size>-<prec>/   encoder[.int4].onnx  decoder_init[.int4].
                                        decoder_weights[.int4].data  embed_tokens.bin (FP16)  config.json  tokenizer.json  ...
 models/whisper_int8/               {tiny,base,small,medium}_{encoder,decoder}_11_int8.onnx  ...
 ```
+
+---
+
+## Which model can my PC run?
+
+After downloading, let the machine pick for you. `check_models.py` loads each
+downloaded model in its own subprocess, transcribes a ~10 s clip and reports load
+time, latency, real-time factor (RTF) and peak RAM. A model that runs out of memory
+or hangs is killed and reported; it cannot crash the script.
+
+```bash
+# Check every model in the registry (a few minutes; the large ones take longest)
+uv run python src/utils/check_models.py
+
+# Only some models / only static checks (files, deps, estimated RAM; takes seconds)
+uv run python src/utils/check_models.py --models whisper_int8_tiny,qwen3_onnx_0.6b_int8
+uv run python src/utils/check_models.py --no-run
+
+# Also try models predicted to need more RAM than is free; save a JSON report
+uv run python src/utils/check_models.py --force --json report.json
+```
+
+| Verdict | Meaning |
+|---|---|
+| `REAL-TIME` | RTF ≤ 0.5: comfortable for live streaming |
+| `BORDERLINE` | RTF ≤ 1.0: keeps up on one stream with little headroom |
+| `OFFLINE ONLY` | RTF > 1.0: fine for files, too slow for live calls |
+| `NOT DOWNLOADED` / `MISSING DEPS` | files or Python packages missing (the note shows the fix) |
+| `TOO BIG` / `OUT OF MEMORY` / `TIMEOUT` | does not fit in the free RAM, or did not finish in `--timeout` |
+| `NO OUTPUT` / `ERROR` | the model loaded or crashed but gave no usable transcript |
+
+It ends with a recommendation (best accuracy that still runs in real time,
+fastest, lightest on RAM) and the exact `default_model` line to put in
+`config/config.yaml`. Close other heavy apps first, since the check uses the RAM
+that is free at that moment.
 
 ---
 

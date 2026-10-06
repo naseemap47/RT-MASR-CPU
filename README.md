@@ -47,6 +47,7 @@ flowchart LR
     end
 
     BM["benchmark/run_benchmark.py"]
+    LT["loadtest/run_loadtest.py"]
     CFG["config/ (model registry)"]
 
     C -- "PCM frames + start/end_call" --> W
@@ -57,9 +58,12 @@ flowchart LR
     W -- "chunk_ack · transcript_delta · call_ended" --> T
     CFG --> Server
     CFG --> BM
+    CFG --> LT
     BM --> E1
     BM --> E2
     BM --> E3
+    LT --> E1
+    LT --> E3
 ```
 
 ### Call-leg flow
@@ -409,11 +413,55 @@ throughput column is from the older batch-mode concurrency test):
 
 ---
 
+## Run the load test and capacity sizing
+
+The load test answers *how many simultaneous live calls can one CPU node carry, and what does that mean for
+50-1,000 legs?* It runs many independent real-time call legs (one leg = one audio source streamed at real-time
+pace through the live server's stream logic) on pinned worker processes, ramps the number of legs until the
+machine saturates, and writes the measured data. A separate step turns it into a sizing guide.
+
+```bash
+# Show the scenarios (model x load profile x vCPUs x processes)
+uv run python loadtest/run_loadtest.py --list
+
+# Full run (about 1 h; keep the machine otherwise idle)
+uv run python loadtest/run_loadtest.py
+
+# Narrower runs
+uv run python loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny --vcpus 8,16 --processes 1,2
+uv run python loadtest/run_loadtest.py --levels 1,2 --duration 15        # smoke run
+
+# Build the sizing guide from one or more raw results (every assumption is a flag)
+uv run python loadtest/run_sizing.py --input loadtest/results/<dense>_loadtest_raw.json loadtest/results/<conv>_loadtest_raw.json
+uv run python loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --legs 50,100,1000
+```
+
+- **Profiles:** `dense` (about 85% speech, stress) and `conversational` (about 47% speech, planning case).
+- **Saturation point:** the highest leg count where every leg keeps p95 staleness and end-of-call lag within
+  `slo.lag_threshold_s` (2 s by default), found by ramp, bisect and confirm.
+- **Outputs:** `loadtest/results/<UTC>_loadtest_raw.json` and `_loadtest_summary.md` (measured), then
+  `<UTC>_sizing_guide.md` and `_sizing.json` (derived and extrapolated, each number tagged
+  MEASURED / DERIVED / ASSUMED / EXTRAPOLATED).
+- **Memory safety:** workers start one at a time against free RAM, and levels that would not fit are skipped
+  (reserve and floor in `loadtest/configs/loadtest_config.yaml`).
+
+Result on the development laptop (8 cores / 16 threads): one node saturates at only **1-3 legs**
+(Whisper tiny INT8: 2 conversational legs on 8 vCPU, 3 with two 8-thread processes on 16 vCPU; Qwen3-0.6B INT8:
+1 leg on 4 vCPU and no gain from more cores). The guide therefore scales **out** with 4-8 vCPU nodes, and every
+50+ leg row is extrapolated and labelled with its confidence. For example, 100 conversational legs is about
+87 Whisper-tiny nodes of 8 vCPU or 110 Qwen3 nodes of 4 vCPU, including 10% spares. See
+[`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) for the full tables (50/60/100/200/500/1,000 legs),
+assumptions and limitations, and [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) for how the pipeline works.
+Re-run it on your target instance type before buying hardware.
+
+---
+
 ## Tests
 
 ```bash
 uv run pytest tests/test_live_call_session.py   # session buffer / gate / VAD, no models needed
 uv run pytest benchmark/tests                   # benchmark pipeline, uses fake engines
+uv run pytest loadtest/tests                    # load-test core and sizing model, no models needed
 uv run pytest                                   # all of tests/ (needs models + test_audio)
 ```
 
@@ -435,6 +483,8 @@ uv run pytest                                   # all of tests/ (needs models + 
 - The energy gate is a fixed RMS threshold calibrated on the test audio, not a
   trained VAD; there is no queue limit or drop policy for frames that arrive
   during inference.
+- Load-test sizing for 50+ legs is extrapolated from a single laptop CPU where a node saturates at 1-3
+  legs, so it carries Low / Very low confidence; re-measure on the target hardware.
 - Mandarin and Indonesian references are partly unverified drafts, so ZH/ID
   accuracy numbers are not yet meaningful.
 
@@ -447,3 +497,5 @@ uv run pytest                                   # all of tests/ (needs models + 
 | [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
+| [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |
+| [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | CPU sizing for 50-1,000 concurrent legs (measured vs extrapolated) |

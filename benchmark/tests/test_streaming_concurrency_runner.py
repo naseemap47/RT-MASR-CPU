@@ -183,3 +183,23 @@ def test_summary_reporter_renders_streaming_and_batch_sections(tmp_path):
     assert "Kept up" in text and "Max Legs Kept Up" in text
     assert "Batch (offline) mode" in text and "Requests" in text
     assert "1/1" in text and "2/2" in text
+
+
+@pytest.mark.parametrize("mode,engine", [
+    ("vad_utterance", _FakeQwen(delay=0.3)),
+    ("sliding_window", _FakeWhisper(delay=0.3)),
+])
+def test_overload_guard_aborts_a_leg_that_falls_far_behind(mode, engine):
+    t = time.perf_counter()
+    r = _runner(engine, mode, legs=(1,), abort_lag_s=0.2).run()[0]
+    assert r.legs_aborted == 1 and r.legs_kept_up == 0 and r.legs[0].aborted
+    assert time.perf_counter() - t < 3.0     # stopped early instead of finishing the 6 s stream
+
+
+def test_run_level_supports_global_leg_offsets_for_multi_process_slices():
+    runner = _runner(_FakeQwen(), "vad_utterance", files=("a.wav", "b.wav"),
+                     audio_loader=_loader({"a.wav": 4.0, "b.wav": 6.0}))
+    eng = _FakeQwen()
+    r = runner.run_level(eng, 2, stagger_s=0.0, leg_offset=1, start_at=time.time() + 0.1)
+    assert [leg.leg for leg in r.legs] == [1, 2]
+    assert [leg.audio_file for leg in r.legs] == ["b.wav", "a.wav"]

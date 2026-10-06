@@ -18,6 +18,7 @@
 | 7 | Config-driven model registry and multiple backends | 2026-10-04 |
 | 8 | Offline benchmark pipeline | 2026-10-04 |
 | 9 | Whisper ONNX engine (benchmark comparison) | 2026-10-05 |
+| 10 | Load test and capacity sizing | 2026-10-06 |
 
 ---
 
@@ -585,3 +586,28 @@ models/runtimes.
 Whisper is wired into the benchmark only. `main.py` `_build_engine()` still
 accepts just `onnx` and `transformers`, so a `whisper_*` `default_model` is not
 servable by the live UI yet.
+
+---
+
+## 10. Load Test and Capacity Sizing
+
+### Problem
+
+The benchmark's concurrency scaling runs legs inside one process on one thread pool; it does not show where a node saturates or how
+to size a fleet for tens to thousands of simultaneous calls.
+
+### Changes
+
+- New `loadtest/` package: `WorkerPool` (P pinned worker processes, each one engine, real-time call legs with the live server's stream logic),
+  `run_ramp` (ladder -> bisect -> confirm saturation search with memory guards), `TreeSampler` (pinned-CPU, RSS and free-RAM sampling),
+  reporters, and `run_loadtest.py`.
+- `StreamingConcurrencyRunner` gained an overload guard (`abort_lag_s`), `prepare()` / `run_level()` and global leg offsets so a level can be
+  split across processes.
+- `loadtest/sizing/` + `run_sizing.py`: turns measured saturation points into a sizing guide (headroom, serving overhead, spares, shared-model
+  memory, scale-up fit, process strategy), tagging every number MEASURED / DERIVED / ASSUMED / EXTRAPOLATED.
+- Docs: `docs/loadtest/loadtest.md` (how it works) and `docs/loadtest/sizing_guide.md` (results for 50/60/100/200/500/1,000 legs).
+
+### Result on the development laptop (8C/16T)
+
+Saturation at 1-3 legs per node; more cores in one process did not help, two pinned processes helped Whisper, four hurt. The sizing for
+50+ legs is therefore extrapolated and stated as such.

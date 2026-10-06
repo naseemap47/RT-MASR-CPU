@@ -31,12 +31,25 @@ if _SRC_ROOT not in sys.path:
 SUPPORTED_BACKENDS = ("onnx", "transformers", "whisper")
 
 
+def _deep_update(base: dict, overrides: dict | None) -> dict:
+    """Merge ``overrides`` into ``base`` in place (nested dicts are merged, other values replaced)."""
+    for key, value in (overrides or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 def load_engine(config_entry: dict) -> Any:
     """
     Instantiate an ASR engine from a bench_config entry.
 
     Args:
-        config_entry: Dict with keys: id, backend, model_config.
+        config_entry: Dict with keys: id, backend, model_config, and optionally
+                      ``overrides`` (a dict deep-merged into the model YAML, e.g.
+                      ``{"engine": {"num_threads": 4}}`` -- used by the load test to
+                      size the ORT thread pool per process).
 
     Returns:
         A live engine instance with a .transcribe(audio_path) -> dict method.
@@ -57,6 +70,7 @@ def load_engine(config_entry: dict) -> Any:
 
     with open(model_config_path, "r") as f:
         model_cfg = yaml.safe_load(f)
+    _deep_update(model_cfg, config_entry.get("overrides"))
 
     if backend == "onnx":
         from engines.qwen3_onnx_engine import ONNXQwen3ASR

@@ -84,6 +84,7 @@ class StreamLegResult:
     p95_staleness_s: float = 0.0
     max_staleness_s: float = 0.0
     kept_up: bool = False
+    aborted: bool = False                  # overload guard hit: stopped early (see abort_lag_s)
     final_text: str = ""
     raw_pass_latencies: list[float] = field(default_factory=list)
     raw_pass_rtfs: list[float] = field(default_factory=list)
@@ -112,6 +113,7 @@ class StreamingConcurrencyResult:
     wall_elapsed_s: float = 0.0
     total_audio_s: float = 0.0
     total_passes: int = 0
+    legs_aborted: int = 0
     legs: list[StreamLegResult] = field(default_factory=list)
 
 
@@ -136,6 +138,9 @@ class StreamingConcurrencyRunner:
         pace:             Playback speed. 1.0 = real time; >1 only for tests and smoke runs
                           (the latency/lag numbers are then not meaningful).
         audio_loader:     ``path -> float32 16 kHz mono waveform`` (injectable for tests).
+        abort_lag_s:      Overload guard: a leg whose transcript falls this far behind stops
+                          streaming (marked ``aborted``, never "kept up"). Keeps a badly
+                          overloaded level from running for minutes. None = never abort.
     """
 
     def __init__(
@@ -152,6 +157,7 @@ class StreamingConcurrencyRunner:
         warmup: bool = True,
         pace: float = 1.0,
         audio_loader: Optional[Callable[[str], np.ndarray]] = None,
+        abort_lag_s: Optional[float] = None,
     ) -> None:
         if stream_mode not in STREAM_MODES:
             raise ValueError(f"stream_mode must be one of {STREAM_MODES}, got {stream_mode!r}")
@@ -169,6 +175,8 @@ class StreamingConcurrencyRunner:
         self.warmup = warmup
         self.pace = pace
         self.audio_loader = audio_loader or _default_audio_loader
+        self.abort_lag_s = abort_lag_s
+        self._waves: dict[str, np.ndarray] = {}
 
     # ── helpers ───────────────────────────────────────────────────────────
 
@@ -219,7 +227,10 @@ class StreamingConcurrencyRunner:
             res.raw_pass_latencies.append(lat)
             if window_s > 0:
                 res.raw_pass_rtfs.append(lat / window_s)
-            res.raw_staleness.append(max(0.0, t_end - arrival(newest)))
+            stale = max(0.0, t_end - arrival(newest))
+            res.raw_staleness.append(stale)
+            if self.abort_lag_s is not None and stale > self.abort_lag_s:
+                res.aborted = True
 
         def note_text(t: float) -> None:
             if res.first_text_s is None:
@@ -256,19 +267,23 @@ class StreamingConcurrencyRunner:
                 record(t_s, t_e, update.window_s, newest)
                 if update.full_text:
                     note_text(t_e)
+                if res.aborted:
+                    break
 
-            t_s = time.perf_counter()
-            try:
-                update = streamer.finish()
-            except Exception as exc:
-                res.errors += 1
-                update = None
-                print(f"    [stream-conc] leg {leg} finish failed: {exc}")
             t_e = time.perf_counter()
-            if update is not None and update.window_s > 0:
-                record(t_s, t_e, update.window_s, n - 1)
-            if update is not None and update.full_text:
-                note_text(t_e)
+            if not res.aborted:
+                t_s = t_e
+                try:
+                    update = streamer.finish()
+                except Exception as exc:
+                    res.errors += 1
+                    update = None
+                    print(f"    [stream-conc] leg {leg} finish failed: {exc}")
+                t_e = time.perf_counter()
+                if update is not None and update.window_s > 0:
+                    record(t_s, t_e, update.window_s, n - 1)
+                if update is not None and update.full_text:
+                    note_text(t_e)
             res.final_text = streamer.committed_text
             t_done = t_e
 
@@ -299,10 +314,12 @@ class StreamingConcurrencyRunner:
                     note_text(t_e)
                 if commit:
                     session.append_committed("".join(deltas))
+                if res.aborted:
+                    break
 
             # end_call: transcribe what is left in the open-utterance buffer
             t_done = time.perf_counter()
-            if len(session.audio_buffer) > 0:
+            if len(session.audio_buffer) > 0 and not res.aborted:
                 audio = session.audio_buffer
                 t_s = time.perf_counter()
                 try:
@@ -325,6 +342,7 @@ class StreamingConcurrencyRunner:
             res.max_staleness_s = st["max"]
         res.kept_up = (
             res.errors == 0
+            and not res.aborted
             and res.passes > 0
             and res.p95_staleness_s <= self.lag_threshold_s
             and res.end_lag_s <= self.lag_threshold_s
@@ -333,23 +351,45 @@ class StreamingConcurrencyRunner:
 
     # ── one concurrency level ─────────────────────────────────────────────
 
-    def _run_one_level(self, engine: Any, n_legs: int, waves: dict[str, np.ndarray]) -> StreamingConcurrencyResult:
-        paths = [self.audio_files[i % len(self.audio_files)] for i in range(n_legs)]
+    def _run_one_level(
+        self,
+        engine: Any,
+        n_legs: int,
+        waves: dict[str, np.ndarray],
+        stagger_s: Optional[float] = None,
+        leg_offset: int = 0,
+        start_at: Optional[float] = None,
+    ) -> StreamingConcurrencyResult:
+        """
+        Run ``n_legs`` simultaneous legs.
+
+        ``leg_offset`` is the global index of the first leg: leg ``i`` streams
+        ``audio_files[(leg_offset + i) % len]`` and starts ``(leg_offset + i) * stagger_s``
+        after the common start, so several processes can each run a slice of one
+        larger level. ``start_at`` (``time.time()`` epoch) is that common start; it
+        lets separate processes begin together. Default: now.
+        """
+        stagger = self.stagger_s if stagger_s is None else stagger_s
+        idx = [leg_offset + i for i in range(n_legs)]
+        paths = [self.audio_files[g % len(self.audio_files)] for g in idx]
         print(f"  [stream-conc] {n_legs} leg(s) streaming concurrently "
               f"({self.stream_mode}, {self.chunk_s}s chunks, pace x{self.pace:g})")
 
         legs: list[StreamLegResult] = []
         wall_start = time.perf_counter()
-        base = wall_start + 0.05
+        if start_at is None:
+            base = wall_start + 0.05
+        else:
+            base = wall_start + max(0.0, start_at - time.time())
         with SystemSampler(interval_s=0.1) as sampler:
-            with ThreadPoolExecutor(max_workers=n_legs) as executor:
+            with ThreadPoolExecutor(max_workers=max(1, n_legs)) as executor:
                 def _run(i: int) -> StreamLegResult:
                     path = paths[i]
                     try:
-                        return self._stream_leg(engine, i, path, waves[path], base + i * self.stagger_s)
+                        return self._stream_leg(engine, idx[i], path, waves[path], base + idx[i] * stagger)
                     except Exception as exc:
-                        print(f"    [stream-conc] leg {i} crashed: {exc}")
-                        return StreamLegResult(leg=i, audio_file=path,
+                        print(f"    [stream-conc] leg {idx[i]} crashed: {exc}")
+                        return StreamLegResult(leg=idx[i], audio_file=path,
                                                audio_s=len(waves[path]) / SAMPLE_RATE, errors=1)
                 legs = list(executor.map(_run, range(n_legs)))
         wall_elapsed = time.perf_counter() - wall_start
@@ -364,7 +404,7 @@ class StreamingConcurrencyRunner:
             stream_mode=self.stream_mode,
             chunk_s=self.chunk_s,
             pace=self.pace,
-            stagger_s=self.stagger_s,
+            stagger_s=stagger,
             lag_threshold_s=self.lag_threshold_s,
             pass_latency_stats=_stats(lat),
             pass_rtf_stats=_stats(rtf),
@@ -378,28 +418,45 @@ class StreamingConcurrencyRunner:
             wall_elapsed_s=wall_elapsed,
             total_audio_s=sum(r.audio_s for r in legs),
             total_passes=sum(r.passes for r in legs),
+            legs_aborted=sum(1 for r in legs if r.aborted),
             legs=legs,
         )
 
-    def run(self) -> list[StreamingConcurrencyResult]:
-        """Run every concurrency level in ``legs_list`` (one result per level)."""
+    # ── public API ────────────────────────────────────────────────────────
+
+    def prepare(self, engine: Any, max_legs: int) -> None:
+        """Decode the audio the first ``max_legs`` legs need and run the un-timed warm-up."""
         if not self.audio_files:
             raise ValueError("StreamingConcurrencyRunner needs at least one audio file")
+        needed = {self.audio_files[i % len(self.audio_files)] for i in range(max(1, max_legs))}
+        for p in needed - set(self._waves):      # decode up front so file I/O never counts against a leg
+            self._waves[p] = np.asarray(self.audio_loader(p), dtype=np.float32)
+        if self.warmup and self._waves:
+            print("  [stream-conc] warm-up pass (not timed)")
+            try:
+                self._warmup(engine, next(iter(self._waves.values())))
+            except Exception as exc:
+                print(f"    [stream-conc] warm-up error: {exc}")
+            self.warmup = False
+
+    def run_level(
+        self,
+        engine: Any,
+        n_legs: int,
+        stagger_s: Optional[float] = None,
+        leg_offset: int = 0,
+        start_at: Optional[float] = None,
+    ) -> StreamingConcurrencyResult:
+        """Run one level on an already-loaded engine (used by the load-test workers)."""
+        self.prepare(engine, leg_offset + n_legs)
+        return self._run_one_level(engine, n_legs, self._waves, stagger_s, leg_offset, start_at)
+
+    def run(self) -> list[StreamingConcurrencyResult]:
+        """Run every concurrency level in ``legs_list`` (one result per level)."""
         engine = self.engine_factory()
         try:
-            # Decode audio up front so file I/O never counts against a leg.
-            max_legs = max(self.legs_list) if self.legs_list else 0
-            needed = {self.audio_files[i % len(self.audio_files)] for i in range(max_legs)}
-            waves = {p: np.asarray(self.audio_loader(p), dtype=np.float32) for p in needed}
-
-            if self.warmup and waves:
-                print("  [stream-conc] warm-up pass (not timed)")
-                try:
-                    self._warmup(engine, next(iter(waves.values())))
-                except Exception as exc:
-                    print(f"    [stream-conc] warm-up error: {exc}")
-
-            return [self._run_one_level(engine, n, waves) for n in self.legs_list]
+            self.prepare(engine, max(self.legs_list) if self.legs_list else 1)
+            return [self._run_one_level(engine, n, self._waves) for n in self.legs_list]
         finally:
             del engine
             gc.collect()

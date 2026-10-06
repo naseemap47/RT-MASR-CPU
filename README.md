@@ -17,6 +17,9 @@ Whisper** (selectable), plus a benchmark harness that compares both families.
   Runtime (INT8 / FP16 / FP32).
 - **Benchmark:** cold-start load, latency/RTF percentiles, WER/CER, and
   concurrency scaling, written to JSON + Markdown reports.
+- **Load test & capacity sizing:** simulates many real-time call legs on pinned
+  worker processes, finds the saturation point and builds a CPU sizing guide
+  for 50-1,000 legs (`loadtest/`, see `docs/loadtest/`).
 
 ---
 
@@ -123,10 +126,11 @@ config/
   models/models.yaml        Model registry
   models/*.yaml             Per-model settings (download, engine, inference)
 benchmark/                  Offline benchmark pipeline (runners, metrics, reporters, tests)
+loadtest/                   Load test (call-leg simulator, saturation search) + sizing model
 tests/                      Server / session / streaming tests
 models/                     Downloaded weights (git-ignored)
 test_audio/{en,cn,id}/      Test WAV files (git-ignored)
-docs/                       Architecture, changelog, benchmark docs
+docs/                       Architecture, changelog, benchmark and load-test docs
 ```
 
 ---

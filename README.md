@@ -279,8 +279,15 @@ test_audio/
 
 These are the files `benchmark/configs/bench_config.yaml` and
 `benchmark/data/references.yaml` expect (English from LibriSpeech speaker 1089,
-Mandarin from the Open Speech Repository Chinese set). Any Linear PCM WAV works
-in the UI; the browser resamples it to 16 kHz mono before streaming.
+Mandarin from the Open Speech Repository Chinese set).
+
+The baseline format everywhere — wire protocol, engines and benchmark numbers —
+is **16 kHz mono Linear PCM (little-endian Int16)**. Any Linear PCM WAV still
+works in the UI: the browser resamples to 16 kHz and averages the channels to
+mono before streaming, and a non-browser client can declare a different rate or
+channel count in `start_call` for the server to normalise instead. See
+[§2.1 Audio format and normalisation](docs/arch/architecture.md#21-audio-format-and-normalisation)
+for the full conversion table and its limitations.
 
 ---
 

@@ -14,6 +14,96 @@ def test_live_call_session_pcm_conversion():
     assert session.audio_buffer.dtype == np.float32
 
 
+# ── Input format normalisation ─────────────────────────────────────────────
+
+def test_declared_baseline_format_is_passed_through():
+    sess = LiveCallSession()
+    fmt = sess.set_input_format(sample_rate=16000, channels=1, encoding="pcm_s16le")
+    assert fmt["resample"] is False and fmt["downmix"] is False
+
+    raw = np.zeros(8000, dtype=np.int16).tobytes()
+    assert sess.process_pcm_bytes(raw)["new_samples_count"] == 8000
+
+
+def test_8khz_input_is_resampled_to_16khz():
+    sess = LiveCallSession()
+    assert sess.set_input_format(sample_rate=8000)["resample"] is True
+
+    # 1 s of 8 kHz audio must become ~1 s of 16 kHz audio, i.e. ~16000 samples
+    t = np.linspace(0, 1, 8000, endpoint=False)
+    raw = (0.3 * np.sin(2 * np.pi * 440 * t) * 32767).astype(np.int16).tobytes()
+    sess.process_pcm_bytes(raw)
+
+    assert len(sess.audio_buffer) == pytest.approx(16000, abs=4)
+    assert sess.audio_buffer.dtype == np.float32
+    # the resampled tone must survive as speech-level energy, not be rescaled
+    assert sess.has_speech() is True
+
+
+def test_resampling_is_continuous_across_chunks():
+    sess = LiveCallSession()
+    sess.set_input_format(sample_rate=8000)
+
+    t = np.linspace(0, 1, 8000, endpoint=False)
+    pcm = (0.3 * np.sin(2 * np.pi * 440 * t) * 32767).astype(np.int16)
+    for start in range(0, 8000, 2000):           # four 0.25 s packets
+        sess.process_pcm_bytes(pcm[start:start + 2000].tobytes())
+
+    one_shot = LiveCallSession()
+    one_shot.set_input_format(sample_rate=8000)
+    one_shot.process_pcm_bytes(pcm.tobytes())
+
+    # splitting the same audio across packets must not change the result
+    assert np.allclose(sess.audio_buffer, one_shot.audio_buffer, atol=1e-6)
+
+
+def test_stereo_input_is_averaged_to_mono():
+    sess = LiveCallSession()
+    assert sess.set_input_format(channels=2)["downmix"] is True
+
+    left = np.full(4000, 10000, dtype=np.int16)
+    right = np.full(4000, -10000, dtype=np.int16)      # opposite phase → cancels
+    interleaved = np.empty(8000, dtype=np.int16)
+    interleaved[0::2] = left
+    interleaved[1::2] = right
+
+    result = sess.process_pcm_bytes(interleaved.tobytes())
+    assert result["new_samples_count"] == 4000          # one mono frame per pair
+    assert np.allclose(sess.audio_buffer, 0.0, atol=1e-4)
+
+
+def test_partial_frame_is_carried_to_the_next_packet():
+    sess = LiveCallSession()
+    raw = np.arange(100, dtype=np.int16).tobytes()
+
+    first = sess.process_pcm_bytes(raw + b"\x01")       # one byte past a frame
+    assert first["new_samples_count"] == 100            # odd byte held back
+
+    second = sess.process_pcm_bytes(b"\x00" + raw)      # completes it
+    assert second["new_samples_count"] == 101
+    assert len(sess.audio_buffer) == 201
+
+
+def test_unsupported_encoding_is_rejected():
+    sess = LiveCallSession()
+    with pytest.raises(ValueError, match="unsupported encoding"):
+        sess.set_input_format(encoding="mulaw")
+
+
+def test_unsupported_sample_rate_is_rejected():
+    sess = LiveCallSession()
+    with pytest.raises(ValueError, match="unsupported sample_rate"):
+        sess.set_input_format(sample_rate=100)
+
+
+def test_mark_call_start_restores_baseline_format():
+    sess = LiveCallSession()
+    sess.set_input_format(sample_rate=8000, channels=2)
+    sess.mark_call_start()
+    fmt = sess.input_format()
+    assert (fmt["sample_rate"], fmt["channels"]) == (16000, 1)
+
+
 # ── has_speech() ───────────────────────────────────────────────────────────
 
 def test_has_speech_returns_false_on_silence():

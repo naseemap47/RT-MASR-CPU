@@ -1,6 +1,15 @@
 """
 LiveCallSession — stateful buffer and telemetry for a single WebSocket call leg.
 
+Input audio contract
+--------------------
+Baseline: 16 kHz, mono, Linear PCM, little-endian Int16 — the format every
+engine's feature extractor expects. A client may declare a different PCM format
+in the ``start_call`` message (``set_input_format``); multi-channel audio is
+averaged to mono and other sample rates are resampled inside
+``process_pcm_bytes`` so nothing past this class sees a non-baseline sample.
+Non-Linear-PCM encodings are rejected rather than guessed at.
+
 Timestamp capture points
 ------------------------
 T0  session.start_time          : wall-clock at WebSocket accept + start_call message
@@ -48,10 +57,23 @@ import numpy as np
 from typing import Dict, Any, Optional
 
 
+SUPPORTED_ENCODINGS = ("pcm_s16le",)
+
+
 class LiveCallSession:
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
         self.audio_buffer = np.array([], dtype=np.float32)
+
+        # ── Declared input format (see set_input_format) ───────────────────
+        # Defaults are the baseline contract, so a client that declares nothing
+        # is taken at its word: 16 kHz mono little-endian Int16.
+        self.input_sample_rate: int = sample_rate
+        self.input_channels: int = 1
+        self.input_encoding: str = "pcm_s16le"
+        self._byte_carry: bytes = b""              # partial frame from the last packet
+        self._resample_carry = np.array([], dtype=np.float32)
+        self._resample_pos: float = 0.0
 
         # ── Wall-clock anchors ─────────────────────────────────────────────
         self.start_time: float = time.time()           # T0: call-start signal
@@ -98,9 +120,109 @@ class LiveCallSession:
         self.audio_buffer = np.array([], dtype=np.float32)
         self._peak_rss_start_kb = self._rss_kb()
         self.committed_text = ""
+        self._reset_input_format()
+
+    # ── Input format negotiation / normalisation ───────────────────────────
+
+    def _reset_input_format(self) -> None:
+        self.input_sample_rate = self.sample_rate
+        self.input_channels = 1
+        self.input_encoding = "pcm_s16le"
+        self._byte_carry = b""
+        self._resample_carry = np.array([], dtype=np.float32)
+        self._resample_pos = 0.0
+
+    def set_input_format(
+        self,
+        sample_rate: Optional[int] = None,
+        channels: Optional[int] = None,
+        encoding: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Declare the PCM format the client is about to send.
+
+        The baseline is 16 kHz mono little-endian Int16; anything else is
+        normalised to it inside process_pcm_bytes() before the audio can reach
+        an engine, so the rest of the pipeline only ever sees the baseline.
+
+        Raises
+        ------
+        ValueError
+            If the encoding is not Linear PCM Int16, or the rate / channel
+            count is not a usable number. The caller should report this to the
+            client rather than transcribing audio it cannot interpret.
+        """
+        self._reset_input_format()
+
+        if encoding is not None:
+            enc = str(encoding).lower()
+            if enc not in SUPPORTED_ENCODINGS:
+                raise ValueError(
+                    f"unsupported encoding '{encoding}'; expected one of {', '.join(SUPPORTED_ENCODINGS)} "
+                    "(companded formats such as G.711 mu-law/A-law must be expanded to Linear PCM first)"
+                )
+            self.input_encoding = enc
+
+        if sample_rate is not None:
+            rate = int(sample_rate)
+            if not 4000 <= rate <= 192000:
+                raise ValueError(f"unsupported sample_rate {sample_rate}; expected 4000–192000 Hz")
+            self.input_sample_rate = rate
+
+        if channels is not None:
+            ch = int(channels)
+            if not 1 <= ch <= 8:
+                raise ValueError(f"unsupported channel count {channels}; expected 1–8")
+            self.input_channels = ch
+
+        return self.input_format()
+
+    def input_format(self) -> Dict[str, Any]:
+        """The accepted input format plus which normalisation steps it triggers."""
+        return {
+            "sample_rate": self.input_sample_rate,
+            "channels": self.input_channels,
+            "encoding": self.input_encoding,
+            "downmix": self.input_channels > 1,
+            "resample": self.input_sample_rate != self.sample_rate,
+            "normalized_to": {"sample_rate": self.sample_rate, "channels": 1, "encoding": "pcm_s16le"},
+        }
+
+    def _resample_to_baseline(self, mono: np.ndarray) -> np.ndarray:
+        """Linear-interpolate `mono` from input_sample_rate up/down to sample_rate.
+
+        Phase is carried across packets (`_resample_pos`, `_resample_carry`) so
+        chunk seams do not produce clicks. Linear interpolation is a fallback for
+        non-baseline clients: it is cheap and dependency-free but a poorer
+        anti-alias filter than the browser's resampler, so clients that can send
+        16 kHz should. The realistic case is 8 kHz telephony, which has no
+        content above 4 kHz for imaging to fold back.
+        """
+        src = np.concatenate([self._resample_carry, mono]) if len(self._resample_carry) else mono
+        if len(src) < 2:
+            self._resample_carry = src
+            return np.array([], dtype=np.float32)
+
+        step = self.input_sample_rate / self.sample_rate     # input samples per output sample
+        n_out = int(np.floor((len(src) - 1 - self._resample_pos) / step)) + 1
+        if n_out <= 0:
+            self._resample_carry = src
+            return np.array([], dtype=np.float32)
+
+        idx = self._resample_pos + np.arange(n_out) * step
+        out = np.interp(idx, np.arange(len(src)), src).astype(np.float32)
+
+        consumed = int(np.floor(idx[-1]))
+        self._resample_pos = idx[-1] + step - consumed
+        self._resample_carry = src[consumed:]
+        return out
 
     def process_pcm_bytes(self, raw_bytes: bytes) -> Dict[str, Any]:
-        """Convert int16 PCM bytes to float32 and accumulate into audio buffer.
+        """Normalise an incoming PCM packet and accumulate it into audio_buffer.
+
+        Int16 → float32/32768, multi-channel interleaved → averaged mono,
+        non-baseline rate → resampled to self.sample_rate. A packet that ends
+        mid-frame is not an error: the trailing bytes are held back and prefixed
+        to the next packet, so an ill-aligned client cannot abort the call leg.
 
         T1 (first_chunk_time) is set here on the first call.
         """
@@ -110,8 +232,20 @@ class LiveCallSession:
         if self.first_chunk_time is None:
             self.first_chunk_time = time.time()  # T1
 
-        int16_samples = np.frombuffer(raw_bytes, dtype=np.int16)
+        if self._byte_carry:
+            raw_bytes = self._byte_carry + raw_bytes
+        frame_bytes = 2 * self.input_channels
+        usable = len(raw_bytes) - len(raw_bytes) % frame_bytes
+        self._byte_carry = raw_bytes[usable:]
+
+        int16_samples = np.frombuffer(raw_bytes, dtype=np.int16, count=usable // 2)
         float32_samples = int16_samples.astype(np.float32) / 32768.0
+
+        if self.input_channels > 1:
+            float32_samples = float32_samples.reshape(-1, self.input_channels).mean(axis=1)
+        if self.input_sample_rate != self.sample_rate:
+            float32_samples = self._resample_to_baseline(float32_samples)
+
         self.audio_buffer = np.concatenate([self.audio_buffer, float32_samples])
         buffered_seconds = len(self.audio_buffer) / self.sample_rate
 

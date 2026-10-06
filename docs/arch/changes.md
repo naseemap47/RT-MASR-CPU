@@ -549,6 +549,12 @@ Notable decisions:
 - Every concurrency level uses the same fixed audio workload so levels are
   comparable.
 - A failing config is recorded in `failures` instead of aborting the run.
+- Concurrency means live legs: one leg = one independently streamed audio source.
+  `concurrency_mode: stream` (default) plays each leg at real-time pace using the
+  server's own stream logic (Whisper sliding window / Qwen3 VAD utterances) and
+  reports staleness, end lag and how many legs keep up. The earlier offline
+  request-queue test remains as `--concurrency-mode batch`; there a "leg" is a
+  worker thread and "calls" are `legs x rounds` requests (now labelled Requests).
 
 ---
 

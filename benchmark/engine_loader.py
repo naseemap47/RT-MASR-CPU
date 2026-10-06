@@ -77,11 +77,30 @@ def load_engine(config_entry: dict) -> Any:
         )
 
 
+def stream_mode_for(config_entry: dict) -> str:
+    """
+    Live-server streaming strategy for a bench config (same rule as main.py):
+    Whisper backends use a sliding window, every Qwen3 backend VAD-cut utterances.
+    """
+    return "sliding_window" if config_entry.get("backend", "") == "whisper" else "vad_utterance"
+
+
+def streaming_settings(config_entry: dict) -> dict | None:
+    """The ``streaming:`` block of the entry's model YAML (None if absent/unreadable)."""
+    import yaml
+
+    path = config_entry.get("model_config", "")
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return (yaml.safe_load(f) or {}).get("streaming")
+
+
 def engine_factory(config_entry: dict) -> Callable[[], Any]:
     """
     Return a zero-argument factory function that creates a fresh engine.
 
-    Used by ConcurrencyRunner, which needs to instantiate engines on demand.
+    Used by the concurrency runners, which need to instantiate engines on demand.
 
     Args:
         config_entry: Same dict as load_engine().

@@ -349,6 +349,7 @@ The model loads at startup (a few seconds for ONNX). `GET /api/health` reports
 
 ```bash
 # Full run: every config in bench_config.yaml, 3 runs, concurrency legs 1/2/4
+# (one leg = one live audio stream played at real-time pace)
 uv run python benchmark/run_benchmark.py
 
 # Fast run: ONNX only, no accuracy, 1 run
@@ -383,8 +384,16 @@ large for some machines):
 A disabled config can still be run once by naming it:
 `uv run python benchmark/run_benchmark.py --models qwen3_onnx_fp32_1.7b --runs 1`.
 
+**Concurrency.** One leg = one independently streamed audio source. The default
+`concurrency_mode: stream` plays N audio sources into one shared engine at
+real-time pace (the live server's stream logic) and reports whether all N keep
+up (staleness, end lag, max legs kept up). `--concurrency-mode batch` runs the
+older offline test where each "leg" is a worker making back-to-back
+`transcribe()` requests.
+
 Sample results from `benchmark/results/20261004T095157Z_summary.md` (8 physical
-/ 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s):
+/ 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s; the
+throughput column is from the older batch-mode concurrency test):
 
 | Config | Load | Latency P50 | RTF | WER | Throughput @ 4 legs |
 |---|---|---|---|---|---|

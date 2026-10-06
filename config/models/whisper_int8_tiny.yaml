@@ -31,7 +31,7 @@ inference:
   temperature: 0.0
 
 # Live streaming (main.py → src/engines/whisper_streaming.py): sliding window +
-# LocalAgreement-2. The benchmark ignores this block.
+# LocalAgreement-2. The benchmark's streaming concurrency mode uses this block too.
 streaming:
   hop_s: 1.0               # re-transcribe the window every N seconds of new audio
   min_window_s: 1.0        # don't transcribe less audio than this

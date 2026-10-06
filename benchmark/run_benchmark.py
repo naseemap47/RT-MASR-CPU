@@ -7,6 +7,7 @@ Usage:
     python3 benchmark/run_benchmark.py
     python3 benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_int8_tiny
     python3 benchmark/run_benchmark.py --legs 1,2,4 --runs 5
+    python3 benchmark/run_benchmark.py --concurrency-mode batch      # offline request-queue test
     python3 benchmark/run_benchmark.py --skip-accuracy --skip-concurrency
     python3 benchmark/run_benchmark.py --output-dir /tmp/bench_results
 
@@ -28,7 +29,7 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 import yaml
 
-from benchmark.engine_loader import engine_factory
+from benchmark.engine_loader import engine_factory, stream_mode_for, streaming_settings
 from benchmark.reporters.hardware_info import collect_hardware_info
 from benchmark.reporters.json_reporter import JsonReporter
 from benchmark.reporters.summary_reporter import SummaryReporter
@@ -36,6 +37,7 @@ from benchmark.runners.accuracy_runner import AccuracyRunner
 from benchmark.runners.concurrency_runner import ConcurrencyRunner
 from benchmark.runners.latency_runner import LatencyRunner
 from benchmark.runners.load_timer import measure_load_with_engine, release_memory
+from benchmark.runners.streaming_concurrency_runner import StreamingConcurrencyRunner
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -60,6 +62,13 @@ def parse_args() -> argparse.Namespace:
         "--legs",
         default=None,
         help="Comma-separated concurrency leg counts (default: from bench_config.yaml)",
+    )
+    parser.add_argument(
+        "--concurrency-mode",
+        choices=["stream", "batch"],
+        default=None,
+        help="stream = each leg is a live audio stream at real-time pace (default); "
+             "batch = offline queue of transcribe() calls (default: from bench_config.yaml)",
     )
     parser.add_argument(
         "--runs",
@@ -109,7 +118,7 @@ class _StageError(Exception):
 
 def _benchmark_one_config(
     config_entry, args, references, all_audio, conc_audio,
-    n_runs, warmup_runs, legs_list, n_rounds,
+    n_runs, warmup_runs, legs_list, n_rounds, conc_opts,
     load_out, latency_out, accuracy_out, concurrency_out,
 ) -> None:
     """
@@ -158,13 +167,26 @@ def _benchmark_one_config(
         if not args.skip_concurrency:
             stage = "concurrency"
             print("\n[4/4] Concurrency benchmark...")
-            concurrency_out.extend(ConcurrencyRunner(
-                config_id=config_id,
-                engine_factory=lambda: engine,   # reuse the already-loaded engine
-                audio_files=conc_audio,
-                legs_list=legs_list,
-                n_rounds=n_rounds,
-            ).run())
+            if conc_opts["mode"] == "stream":
+                concurrency_out.extend(StreamingConcurrencyRunner(
+                    config_id=config_id,
+                    engine_factory=lambda: engine,   # reuse the already-loaded engine
+                    audio_files=conc_audio,
+                    legs_list=legs_list,
+                    stream_mode=stream_mode_for(config_entry),
+                    streaming_cfg=streaming_settings(config_entry),
+                    chunk_s=conc_opts["chunk_s"],
+                    stagger_s=conc_opts["stagger_s"],
+                    lag_threshold_s=conc_opts["lag_threshold_s"],
+                ).run())
+            else:
+                concurrency_out.extend(ConcurrencyRunner(
+                    config_id=config_id,
+                    engine_factory=lambda: engine,   # reuse the already-loaded engine
+                    audio_files=conc_audio,
+                    legs_list=legs_list,
+                    n_rounds=n_rounds,
+                ).run())
         else:
             print("\n[4/4] Concurrency benchmark SKIPPED (--skip-concurrency).")
     except KeyboardInterrupt:
@@ -196,6 +218,12 @@ def main() -> None:
         cfg.get("concurrency_legs", [1, 2, 4])
     )
     n_rounds    = cfg.get("concurrency_rounds", 2)
+    conc_opts   = {
+        "mode":            args.concurrency_mode or cfg.get("concurrency_mode", "stream"),
+        "chunk_s":         float(cfg.get("concurrency_chunk_s", 0.5)),
+        "stagger_s":       float(cfg.get("concurrency_stagger_s", 0.0)),
+        "lag_threshold_s": float(cfg.get("concurrency_lag_threshold_s", 2.0)),
+    }
 
     # Filter configs
     all_configs = cfg.get("configs", [])
@@ -230,6 +258,7 @@ def main() -> None:
         sys.exit(1)
 
     # Concurrency workload: identical for every config and every legs level
+    # (stream mode: leg i streams file i mod len)
     conc_audio = [a for a in cfg.get("concurrency_audio", all_audio[:1]) if os.path.exists(a)]
     if not conc_audio:
         conc_audio = all_audio[:1]
@@ -253,7 +282,7 @@ def main() -> None:
         try:
             _benchmark_one_config(
                 config_entry, args, references, all_audio, conc_audio,
-                n_runs, warmup_runs, legs_list, n_rounds,
+                n_runs, warmup_runs, legs_list, n_rounds, conc_opts,
                 all_load_results, all_latency_results,
                 all_accuracy_results, all_concurrency_results,
             )
@@ -287,7 +316,11 @@ def main() -> None:
             "latency_warmup":     warmup_runs,
             "latency_audio":      len(all_audio),
             "concurrency_legs":   legs_list if not args.skip_concurrency else "skipped",
-            "concurrency_rounds": n_rounds,
+            "concurrency_mode":   conc_opts["mode"],
+            **({"concurrency_chunk_s":         conc_opts["chunk_s"],
+                "concurrency_stagger_s":       conc_opts["stagger_s"],
+                "concurrency_lag_threshold_s": conc_opts["lag_threshold_s"]}
+               if conc_opts["mode"] == "stream" else {"concurrency_rounds": n_rounds}),
             "concurrency_audio":  ", ".join(os.path.basename(a) for a in conc_audio),
         },
         "load":        all_load_results,

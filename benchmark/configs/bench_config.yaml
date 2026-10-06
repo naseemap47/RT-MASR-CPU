@@ -70,16 +70,32 @@ configs:
 runs: 3
 warmup_runs: 1
 
-# Concurrency levels to test (number of simultaneous call legs).
+# Concurrency levels to test. One leg = one independently streamed audio source.
 concurrency_legs: [1, 2, 4]
 
-# Calls per worker at each concurrency level (total calls = legs * rounds).
+# stream: every leg plays its audio into the engine as a live call (chunks arrive at
+#         real-time pace, same stream logic as the live server). N legs = N sources
+#         streaming at once; the question is "do they all keep up with live speech?".
+# batch:  offline capacity test -- N worker threads call transcribe() back to back
+#         (legs x concurrency_rounds requests), no real-time pacing.
+concurrency_mode: stream
+
+# --- stream mode ---
+concurrency_chunk_s: 0.5          # audio per chunk (the browser sends 0.5 s)
+concurrency_stagger_s: 0.0        # delay between leg start times; 0 = all calls start together (worst case)
+concurrency_lag_threshold_s: 2.0  # a leg "kept up" if p95 staleness and end-of-call lag stay below this
+
+# --- batch mode ---
+# Requests per worker at each level (total requests = legs * rounds).
 concurrency_rounds: 2
 
-# Fixed workload for the concurrency test: call i uses file i % len(list), so every
-# level and every config processes the same audio and results are comparable.
+# Fixed workload for the concurrency test: leg i (batch: request i) uses file
+# i % len(list), so every level and every config processes the same audio and
+# results are comparable. Use several files so legs are not identical streams.
 concurrency_audio:
   - "test_audio/en/librispeech_0_1089_0.wav"
+  - "test_audio/en/librispeech_1_1089_1.wav"
+  - "test_audio/en/librispeech_2_1089_2.wav"
 
 # Audio files for latency and accuracy testing.
 audio:

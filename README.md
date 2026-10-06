@@ -499,3 +499,4 @@ uv run pytest                                   # all of tests/ (needs models + 
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
 | [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |
 | [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | CPU sizing for 50-1,000 concurrent legs (measured vs extrapolated) |
+| [`docs/deployment.md`](docs/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |

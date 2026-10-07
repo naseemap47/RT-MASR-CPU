@@ -632,3 +632,8 @@ RAM, predicted larger chips, fleet vCPU totals). This project deploys on edge CP
 
 The 4/8/16-thread × process **scenario matrix** was later dropped: each model × profile is ramped once on the whole
 machine. `core_sweep` / `process_sweep` were removed from `loadtest_config.yaml`.
+
+The generated sizing guide now has one section 3 subsection per model and profile (latency vs load); the thread-count and
+process-strategy comparisons only appear when a result file holds several layouts. The curated guide, README, deployment
+and project guide were refreshed from the whole-machine run `20261007T170448Z`: Whisper tiny 3 conversational / 2 dense legs,
+Qwen3-0.6B 1 / 1 (one leg more than the October 6 run for Whisper and Qwen dense, within run-to-run noise).

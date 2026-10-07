@@ -21,8 +21,8 @@ simultaneous legs that all keep up) on this edge CPU and then applies, explicitl
   memory          weights are shared by all legs in one process (fixed cost per process, measured)
                   plus a per-leg increment (regression on measured levels); RAM is the GB this box
                   actually needs
-  scale-up        diminishing returns with more pinned threads on this chip, from the measured core
-                  sweep (used only to *describe* the curve; larger unmeasured CPUs are not predicted)
+  scale-up        not predicted: a default run measures this whole machine only; older files with
+                  several pin-widths get a descriptive scaling-law fit, never used for other CPUs
   scale-out       independent identical edge boxes (calls are sticky, nothing is shared): the one
                   place where capacity is taken as additive; its confidence falls with the
                   extrapolation ratio

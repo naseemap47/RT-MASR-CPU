@@ -449,10 +449,11 @@ uv run python loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --le
 - **Memory safety:** workers start one at a time against free RAM, and levels that would not fit are skipped
   (reserve and floor in `loadtest/configs/loadtest_config.yaml`).
 
-Result on the development laptop (8 cores / 16 threads): one box saturates at only **1-2 legs** with the default
-layout (Whisper tiny INT8: 2 conversational legs; Qwen3-0.6B INT8: 1). Extra legs need extra boxes. Every 50+ leg row
-is extrapolated and labelled with its confidence. For example, 100 conversational legs is about 87 Whisper-tiny boxes
-or 110 Qwen3 boxes, including 10% spares. See
+Result on the development laptop (8 cores / 16 threads, whole machine, one process): one box saturates at only
+**1-3 legs** (Whisper tiny INT8: 3 conversational / 2 dense; Qwen3-0.6B INT8: 1 / 1). Extra legs need extra boxes.
+Every 50+ leg row is extrapolated and labelled with its confidence. For example, 100 conversational legs is about
+59 Whisper-tiny boxes (range 44-87, ~4 GB each) or 110 Qwen3 boxes (~7 GB each), including 10% spares. Repeat runs
+differ by about one leg. See
 [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) for the full tables (50/60/100/200/500/1,000 legs),
 assumptions and limitations, and [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) for how the pipeline works.
 Re-run it on the target edge CPU before buying hardware.

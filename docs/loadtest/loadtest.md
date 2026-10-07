@@ -87,6 +87,46 @@ boxes    = ceil(N / legs/box) + max(1, ceil(10% x boxes))        # spare edge bo
 RAM/box  = ceil((processes x weights + legs x MB_per_leg) x 1.2 + 2 GB OS)   # whole GB
 ```
 
+`run_sizing.py` runs no load test. It reads the newest `*_loadtest_raw.json` (or the files given with `--input`; pass
+both the dense and conversational files if they were run separately) and recomputes the tables with the flags.
+It also sizes with `l_sat + 1` and `l_sat - 1` to give an optimistic / pessimistic box range, because the saturation
+point is only known to one leg.
+
+### Worked example: stricter assumptions
+
+```bash
+python3 loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fraction 0.2 --legs 50,100,1000
+```
+
+| Flag | Default | Here | Meaning |
+|---|---|---|---|
+| `--headroom` | 0.70 | 0.6 | run each box at 60% of its measured saturation point |
+| `--serving-overhead` | 1.10 | 1.25 | WebSocket / JSON / resampling cost assumed to add 25% (not measured in-process) |
+| `--spare-fraction` | 0.10 | 0.2 | add 20% spare boxes (at least one) |
+| `--legs` | 50,60,100,200,500,1000 | 50,100,1000 | targets to size |
+
+With the laptop's conversational saturation points (Whisper tiny `l_sat = 3`, Qwen3-0.6B `l_sat = 1`, run
+`20261007T170448Z`):
+
+```
+Whisper: legs/box = max(1, 3 x 0.6 / 1.25) = 1.44      (defaults: 3 x 0.70 / 1.10 = 1.91)
+         100 legs: ceil(100 / 1.44) = 70 boxes + ceil(0.2 x 70) = 14 spares = 84 boxes
+Qwen:    legs/box = max(1, 1 x 0.6 / 1.25) = max(1, 0.48) = 1      (defaults: also 1)
+         100 legs: ceil(100 / 1) = 100 boxes + max(1, ceil(0.2 x 100)) = 20 spares = 120 boxes
+```
+
+Edge boxes, conversational profile (base boxes + spares):
+
+| Target legs | Whisper, default flags | Whisper, these flags | Qwen, default flags | Qwen, these flags |
+|---|---|---|---|---|
+| 50 | 27 + 3 = 30 | 35 + 7 = 42 | 50 + 5 = 55 | 50 + 10 = 60 |
+| 100 | 53 + 6 = 59 | 70 + 14 = 84 | 100 + 10 = 110 | 100 + 20 = 120 |
+| 1000 | 524 + 53 = 577 | 695 + 139 = 834 | 1000 + 100 = 1100 | 1000 + 200 = 1200 |
+
+Confidence is Low-Medium for Whisper at 50-100 legs, Low for Qwen, and Very low for both at 1000. Qwen already sits on
+the one-leg-per-box floor, so for it only the spare fraction changes the answer. Whisper moves with every flag because
+its `l_sat` is above one. A higher `l_sat` (a stronger edge CPU, measured with `run_loadtest.py`) is what reduces box counts.
+
 | Factor | Treatment |
 |---|---|
 | Shared model memory | measured base RSS per layout; one copy per process |

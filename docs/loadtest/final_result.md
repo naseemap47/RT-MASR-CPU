@@ -98,8 +98,9 @@ same English clips in the benchmark:
   clock in the dense profile and 35–41% in the conversational profile**. A second Qwen leg (or a third/fourth Whisper
   leg) makes passes overlap on the same 16 threads, every pass slows down, and staleness crosses 2 s.
 - Qwen's overhead over batch is larger. Its draft passes re-read the whole growing utterance (up to 15 s) about once per
-  second. Whisper re-reads a bounded window, already pays for 30 s padding in batch mode, and skips a backlog instead of
-  queueing it.
+  second. Whisper re-reads a bounded window and skips a backlog instead of queueing it. Its ratio is also flattered: the
+  benchmark decoded Whisper with beam search 5, while live streaming decodes greedily (`beam_size: 1`), so a streaming
+  pass is cheaper than a batch pass of the same audio.
 - Two conversational Qwen legs failed even though the engine was busy only ~70% of the time. The second leg plays
   the short 3.3 s clip and made only 5 passes, so its P95 staleness is effectively its single slowest pass (3.5 s for
   INT8, 4.3 s for INT4), i.e. one pass that collided with the other leg's long utterance.

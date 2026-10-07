@@ -38,6 +38,9 @@ from benchmark.runners.concurrency_runner import ConcurrencyRunner
 from benchmark.runners.latency_runner import LatencyRunner
 from benchmark.runners.load_timer import measure_load_with_engine, release_memory
 from benchmark.runners.streaming_concurrency_runner import StreamingConcurrencyRunner
+from src.core.model_check import (
+    bench_entries_not_downloaded, bench_id_hint, bench_table, unknown_name_message,
+)
 from src.core.runlog import start_run
 
 logger = logging.getLogger("rtmasr.benchmark")
@@ -232,7 +235,11 @@ def _run(args: argparse.Namespace, run) -> None:
         known = {c["id"] for c in all_configs}
         unknown = [m for m in wanted if m not in known]
         if unknown:
-            logger.error("Unknown config id(s): %s. Available: %s", unknown, sorted(known))
+            hint = bench_id_hint(unknown, all_configs)
+            hint = (hint + "\n" if hint else "") + (
+                "Benchmark ids come from bench_config.yaml; pass them as --models <id>[,<id>...]")
+            logger.error("\n%s\n", unknown_name_message(
+                "benchmark id", unknown, known, bench_table(all_configs), where="--models", hint=hint))
             sys.exit(1)
         all_configs = [c for c in all_configs if c["id"] in set(wanted)]
     else:
@@ -246,6 +253,19 @@ def _run(args: argparse.Namespace, run) -> None:
     if not all_configs:
         logger.error("No configs selected. Check --models or bench_config.yaml.")
         sys.exit(1)
+
+    not_downloaded = bench_entries_not_downloaded(all_configs)
+    for _, msg in not_downloaded:
+        logger.error("\n%s\n", msg)
+    if not_downloaded:
+        if args.models:
+            sys.exit(1)
+        skip = {e["id"] for e, _ in not_downloaded}
+        logger.warning("Skipping config(s) that are not downloaded: %s", ", ".join(sorted(skip)))
+        all_configs = [c for c in all_configs if c["id"] not in skip]
+        if not all_configs:
+            logger.error("No downloaded configs left to benchmark.")
+            sys.exit(1)
 
     # Audio files (latency) — warn about, and drop, missing files up front
     all_audio = collect_audio_files(cfg.get("audio", {}))

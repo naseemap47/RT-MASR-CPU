@@ -48,7 +48,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from src.core.config import resolve_model_config, load_server_config
+from src.core.config import load_server_config
+from src.core.model_check import ModelSetupError, check_registry_model
 from src.core.runlog import begin_run
 from src.engines.live_call_session import LiveCallSession
 from src.engines.whisper_streaming import StreamingConfig, WhisperSlidingWindowStreamer
@@ -84,7 +85,7 @@ def _build_engine(model_cfg: dict) -> ASREngine:
     in the resolved per-model config dict.
 
     Args:
-        model_cfg: Per-model config dict (from resolve_model_config).
+        model_cfg: Per-model config dict (from check_registry_model).
 
     Returns:
         A fully constructed engine instance (ONNXQwen3ASR, Qwen3ASR or WhisperOnnxEngine).
@@ -117,7 +118,10 @@ def _load_active_model() -> ASREngine:
     """Resolve the active model config, record its metadata and build the engine."""
     global _engine, _active_model_name, _active_backend, _streaming_cfg
 
-    model_cfg = resolve_model_config(CONFIG_PATH, model_name=_model_name_override())
+    override = _model_name_override()
+    name = override or load_server_config(CONFIG_PATH).get("default_model")
+    where = "RT_MASR_MODEL" if override else f"default_model in {CONFIG_PATH}"
+    model_cfg = check_registry_model(name, config_path=CONFIG_PATH, where=where)
     _active_model_name = model_cfg.get("display_name", model_cfg.get("name", "?"))
     _active_backend    = model_cfg.get("backend", "?")
     _streaming_cfg     = StreamingConfig.from_dict(model_cfg.get("streaming"))
@@ -135,7 +139,14 @@ async def lifespan(app: FastAPI):
     level = os.environ.get("RT_MASR_LOG_LEVEL") or server_cfg.get("server", {}).get("log_level", "info")
     _run_session = begin_run("server", level=level, skip_if_pytest=True)
 
-    _load_active_model()
+    try:
+        _load_active_model()
+    except ModelSetupError as exc:
+        logger.error("\n%s\n", exc)
+        if _run_session is not None:
+            _run_session.close(exit_code=1)
+            _run_session = None
+        raise RuntimeError("ASR model setup failed (see the message above)") from None
     _model_ready = True
     logger.info("Engine ready: %s (stream mode: %s)", _active_model_name, _stream_mode())
     try:

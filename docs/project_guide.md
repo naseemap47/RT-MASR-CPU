@@ -61,6 +61,7 @@ config/
   models/*.yaml              per-model settings (download, engine, inference, streaming, ort_session)
 src/
   core/config.py             YAML loading + registry resolution (config.yaml -> models.yaml -> model yaml)
+  core/model_check.py        model preflight: unknown name -> available list, not downloaded -> download command
   core/runlog.py             per-run log session: logs/<pipeline>/<UTC>/run.log + run.meta.json
   core/observe.py            AI inference traces (LangSmith-style JSONL, no UI): traces.jsonl
   engines/
@@ -408,6 +409,11 @@ config/config.yaml         default_model: "qwen3_onnx_0.6b_int4"
 `RT_MASR_MODEL=<name>` overrides the default for one run. `main.py` picks the stream mode from the backend:
 `whisper` -> `sliding_window`, everything else -> `vad_utterance`.
 
+Before the engine is built, `main.py` calls `check_registry_model` (`src/core/model_check.py`). A misspelled name stops
+startup with "did you mean" and a table of registry names (with a `DOWNLOADED` column); a model whose files are missing
+stops with `uv run python src/utils/download_utils.py --model <name>`. The benchmark and load test run the same check on
+their ids and show the registry name each id downloads as (ids and registry names differ).
+
 Gotcha: the `streaming:` block in the **Qwen** YAMLs (`min_buffer_samples`, `infer_every_n_chunks`) is documentation
 only; `main.py` hard-codes those values. The `streaming:` block of the **Whisper** YAMLs *is* read
 (`StreamingConfig.from_dict`).
@@ -424,6 +430,7 @@ only; `main.py` hard-codes those values. The `streaming:` block of the **Whisper
 | Load test | `loadtest/tests/*` (28 tests) | Topology, tiled call audio, ramp logic (stops, bisects, confirms, memory guard), sizing arithmetic, USL fit, rendered report |
 | Logging | `tests/test_runlog.py` | Run directory, `run.log` / `run.meta.json`, env overrides, pytest skip |
 | AI traces | `tests/test_observe.py` | Nested call/inference JSONL, errors, stream wrap, no waveform stored, `RT_MASR_OBSERVE=0` |
+| Model preflight | `tests/test_model_check.py` | Unknown name suggests and lists available models, missing files give the download command, benchmark id -> registry name mapping |
 
 Run: `uv run pytest benchmark/tests loadtest/tests` (about 120 tests, models not needed) and
 `uv run pytest tests/test_live_call_session.py tests/test_runlog.py tests/test_observe.py`. Fake engines are used so tests are fast and need no model files.
@@ -777,7 +784,7 @@ pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is 
 4. **`ttft_ms` is a whole-pass time**, and on the commit path `rtf` is computed on the leftover buffer.
 5. **Hard-coded trigger values** in `main.py`; the Qwen YAML `streaming:` keys are unused.
 6. **Whisper hop counting uses raw bytes** (`_total_samples`), wrong for non-16 kHz or multi-channel input; fine for the browser.
-7. **Default model** in `config.yaml` is `qwen3_onnx_0.6b_int4`, which has the empty-output issue on one clip with auto-detect. The README text still says the default is `whisper_int8_tiny`; check `config/config.yaml` before the demo.
+7. **Default model** in `config.yaml` is `qwen3_onnx_0.6b_int4`, which has the empty-output issue on one clip with auto-detect; check `config/config.yaml` before the demo.
 8. **Load test**: one laptop CPU, shared machine, whole-leg resolution (1-3 legs), repeated runs differ by one leg
    (Whisper conversational was 2 legs in the October 6 run and 3 in `20261007T170448Z`, which moves 100 legs between 87 and
    59 boxes), clean English speech only, 30 s calls.

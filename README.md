@@ -114,6 +114,7 @@ main.py                     FastAPI app: UI, /api/*, /ws/call-stream
 static/                     Web UI (index.html, app.js, style.css)
 src/
   core/config.py            Config + model-registry resolution
+  core/model_check.py       Model preflight: unknown name -> available list, missing files -> download command
   core/runlog.py            Per-run log session (`run.log`, `run.meta.json`)
   core/observe.py           AI inference traces (`traces.jsonl`, no UI)
   engines/
@@ -239,6 +240,22 @@ models/qwen3-asr-onnx-<size>-<prec>/   encoder[.int4].onnx  decoder_init[.int4].
 models/whisper_int8/               {tiny,base,small,medium}_{encoder,decoder}_11_int8.onnx  ...
 ```
 
+### Missing or mistyped models
+
+The server, benchmark, load test, `check_models.py` and the downloader check the model before loading it:
+
+- **Not downloaded:** the terminal shows which files are missing and the exact command to fetch them.
+- **Wrong name / id:** the terminal shows "did you mean …" and a table of valid names with a `DOWNLOADED` yes/NO column.
+
+```text
+Model 'whisper_fp16' is not downloaded.
+  missing in models/whisper_fp16: medium_encoder*.onnx, medium_decoder*.onnx
+Download it with:
+  uv run python src/utils/download_utils.py --model whisper_fp16
+```
+
+Benchmark and load-test ids (`qwen3_onnx_int8_0.6b`) differ from registry names (`qwen3_onnx_0.6b_int8`). Their table shows both, and typing a registry name where an id is expected tells you which id to use. In a default run (no `--models`), models that are not downloaded are skipped with that message; when you name one explicitly with `--models`, the run stops instead.
+
 ---
 
 ## Which model can my PC run?
@@ -320,7 +337,7 @@ The name is resolved through `config/models/models.yaml` to a per-model YAML
 (`config/models/<name>.yaml`) that holds engine settings such as `num_threads`
 (0 = all cores), `quantize`, `dtype`, default `language` and ORT session options.
 
-- The repo currently ships with `default_model: "whisper_int8_tiny"`. Qwen3-1.7B
+- The repo currently ships with `default_model: "qwen3_onnx_0.6b_int4"`. Qwen3-1.7B
   ran slower than real time on an 8-core CPU in our benchmark (RTF ≈ 1.0–1.5); use
   `qwen3_onnx_0.6b_int8` or `whisper_int8_tiny` for a smooth live demo.
 - `whisper_*` entries are served with **sliding-window streaming**: the window
@@ -352,7 +369,10 @@ Open <http://localhost:8000>, then:
 4. **Hang Up** ends the call early; **Reset** clears the UI.
 
 The model loads at startup (a few seconds for ONNX). `GET /api/health` reports
-`model_ready`, the active model and process CPU/RSS.
+`model_ready`, the active model and process CPU/RSS. If `default_model` /
+`RT_MASR_MODEL` is misspelled or its weights are not downloaded, startup stops
+with the list of available models or the download command (see
+[Missing or mistyped models](#missing-or-mistyped-models)).
 
 ---
 

@@ -53,6 +53,13 @@ import psutil
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+from core.model_check import (  # noqa: E402
+    download_command, missing_files, registry_table, unknown_name_message,
+)
+
 RESULT_TAG = "@@RESULT@@ "
 logger = logging.getLogger("rtmasr.check_models")
 
@@ -68,13 +75,6 @@ DEFAULT_AUDIO  = "test_audio/en/librispeech_0_1089_0.wav"
 # Approximate accuracy ranking, only used to pick "best model that still keeps up".
 _SIZE_RANK = {"tiny": 1.0, "base": 2.0, "small": 3.0, "medium": 4.0, "0.6b": 4.5, "1.7b": 6.0}
 _PRECISION_PENALTY = {"int4": 0.3, "int8": 0.1}
-
-_DEFAULT_ONNX_FILES = [
-    "decoder_init.int8.onnx", "decoder_step.int8.onnx", "embed_tokens.bin",
-    "encoder_conv.onnx", "encoder_conv.onnx.data",
-    "encoder_transformer.onnx", "encoder_transformer.onnx.data", "tokenizer.json",
-]
-
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -117,55 +117,6 @@ def load_registry() -> list[dict]:
     return reg["models"]
 
 
-def _size(paths) -> int:
-    return sum(p.stat().st_size for p in paths if p.is_file())
-
-
-def inspect_files(cfg: dict) -> tuple[list[str], int]:
-    """Return (missing file descriptions, bytes on disk) for one model config."""
-    dl = cfg.get("download", {})
-    eng = cfg.get("engine", {})
-    method = dl.get("method", "snapshot")
-    backend = cfg.get("backend")
-
-    if method == "hf_files":
-        d = ROOT / dl["target_dir"]
-        files = dl["files"]
-        missing = [f for f in files if not (d / f).is_file() or (d / f).stat().st_size == 0]
-        return missing, _size(d / f for f in files)
-
-    if method == "onnx":
-        d = ROOT / dl["target_dir"]
-        files = dl.get("required_files") or _DEFAULT_ONNX_FILES
-        missing = [f for f in files if not (d / f).is_file()]
-        return missing, _size(d / f for f in files)
-
-    if method == "whisper" or backend == "whisper":
-        d = ROOT / eng.get("model_dir", dl.get("target_dir", ""))
-        size = eng.get("model_name", "")
-        enc = sorted(d.glob(f"{size}_encoder*.onnx")) if d.is_dir() else []
-        dec = sorted(d.glob(f"{size}_decoder*.onnx")) if d.is_dir() else []
-        missing = []
-        if not enc:
-            missing.append(f"{size}_encoder*.onnx")
-        if not dec:
-            missing.append(f"{size}_decoder*.onnx")
-        # Prefer files of the configured precision when several exist.
-        prec = eng.get("precision", "")
-        pick = lambda fs: [f for f in fs if prec and prec in f.name] or fs[:1]
-        return missing, _size(pick(enc) + pick(dec))
-
-    # snapshot (Transformers): a directory with config.json + safetensors weights
-    d = ROOT / dl.get("local_dir", eng.get("model_path", ""))
-    weights = sorted(d.glob("*.safetensors")) if d.is_dir() else []
-    missing = []
-    if not (d / "config.json").is_file():
-        missing.append("config.json")
-    if not weights:
-        missing.append("*.safetensors")
-    return missing, _size(weights)
-
-
 def missing_dependencies(backend: str) -> list[str]:
     need = {
         "onnx": ["onnxruntime", "soundfile", "tokenizers"],
@@ -199,7 +150,7 @@ def inspect_model(entry: dict) -> ModelReport:
         config=entry["config"],
         quality=quality_score(entry["name"], cfg),
     )
-    missing, disk = inspect_files(cfg)
+    missing, disk = missing_files(cfg)
     rep.missing, rep.disk_gb = missing, disk / 1024 ** 3
     rep.downloaded = not missing
     rep.missing_deps = missing_dependencies(backend)
@@ -439,7 +390,7 @@ def recommend(reports: list[ModelReport]) -> None:
 def explain_skips(reports: list[ModelReport]) -> None:
     for r in reports:
         if r.status == "NOT DOWNLOADED":
-            r.note = f"missing {', '.join(r.missing[:3])}. Download: uv run python src/utils/download_utils.py --model {r.name}"
+            r.note = f"missing {', '.join(r.missing[:3])}. Download: {download_command(r.name)}"
         elif r.status == "MISSING DEPS":
             r.note = f"python package(s) not installed: {', '.join(r.missing_deps)}"
 
@@ -484,7 +435,9 @@ def _main(args: argparse.Namespace) -> int:
         wanted = [m.strip() for m in args.models.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in {e["name"] for e in registry}]
         if unknown:
-            logger.error("Unknown model(s): %s. Available: %s", unknown, [e["name"] for e in registry])
+            logger.error("\n%s\n", unknown_name_message(
+                "model", unknown, [e["name"] for e in registry], registry_table(registry),
+                where="--models"))
             return 1
         registry = [e for e in registry if e["name"] in wanted]
 

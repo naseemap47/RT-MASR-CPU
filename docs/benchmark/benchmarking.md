@@ -98,7 +98,7 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_i
 | Flag | Effect |
 |---|---|
 | `--config PATH` | Alternative bench config |
-| `--models a,b` | Subset of config ids |
+| `--models a,b` | Subset of config ids (not registry names; an unknown id prints the valid ids, their registry names and whether each is downloaded) |
 | `--runs N` | Override `runs` |
 | `--legs 1,2,4,8` | Override `concurrency_legs` |
 | `--concurrency-mode stream\|batch` | Override `concurrency_mode` |
@@ -107,6 +107,12 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_i
 | `--output-dir DIR` | Override `output_dir` |
 
 Exit code is `2` if any config failed, `1` for invalid arguments/inputs.
+
+Before any config runs, its weights are checked on disk. A config that is not
+downloaded prints the missing files and the command to fetch it
+(`uv run python src/utils/download_utils.py --model <registry name>`). In a
+default run it is skipped and the others continue; if it was named with
+`--models`, the run stops with exit code `1`.
 
 ---
 

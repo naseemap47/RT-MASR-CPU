@@ -62,6 +62,7 @@ flowchart LR
 | Per-run logging | `src/core/runlog.py` | `logs/<pipeline>/<UTC>/run.log` and `run.meta.json` for every CLI / server run |
 | AI traces | `src/core/observe.py` | LangSmith-style JSONL runs in `traces.jsonl` (one object per inference; no UI) |
 | Model acquisition | `src/utils/download_utils.py` | Download weights from Hugging Face or the PINTO model zoo |
+| Model preflight | `src/core/model_check.py` | Before loading: unknown name → available models; missing files → download command |
 
 ---
 
@@ -355,15 +356,23 @@ Whisper ONNX pipeline:
 
 ```mermaid
 flowchart LR
-    A["config/config.yaml<br/>default_model: qwen3_1.7b"] --> B["config/models/models.yaml<br/>registry: name → config, backend, model_dir"]
+    A["config/config.yaml<br/>default_model (or RT_MASR_MODEL)"] --> B["config/models/models.yaml<br/>registry: name → config, backend, model_dir"]
     B --> C["config/models/{name}.yaml<br/>download · engine · inference · audio · ort_session"]
-    C --> D["main.py _build_engine()<br/>backend: onnx | transformers"]
+    C --> P["model_check.py preflight<br/>known name? files on disk?"]
+    P --> D["main.py _build_engine()<br/>backend: onnx | transformers | whisper"]
     C --> E["benchmark/engine_loader.py<br/>backend: onnx | transformers | whisper"]
-    C --> F["download_utils.py<br/>download.method: onnx | snapshot | whisper"]
+    C --> F["download_utils.py<br/>download.method: onnx | hf_files | snapshot | whisper"]
 ```
 
 `resolve_model_config()` resolves registry and per-model paths relative to the
-project root (the parent of `config/`).
+project root (the parent of `config/`). Before an engine is built,
+`src/core/model_check.py` checks the name and the files on disk: an unknown
+name stops with "did you mean" and a table of available models (with a
+`DOWNLOADED` column); missing weights stop with the exact
+`download_utils.py --model <name>` command. The server uses
+`check_registry_model`; the benchmark and load test check their ids the same
+way (a default run skips models that are not downloaded, an explicit
+`--models` stops).
 
 ---
 

@@ -22,6 +22,7 @@
 | 11 | Load test retargeted to edge CPU (no cloud SKU math) | 2026-10-07 |
 | 12 | Per-run logging under `logs/` | 2026-10-07 |
 | 13 | AI observability traces (`traces.jsonl`) | 2026-10-08 |
+| 14 | Model preflight (download command / available models) | 2026-10-08 |
 
 ---
 
@@ -668,3 +669,18 @@ Every pipeline (`main.py`, benchmark, load test, sizing, download, check_models)
 - `RunSession.start` attaches that file; spawned workers get `workers/<name>.traces.jsonl`.
 - Hooked on every engine `transcribe` / `transcribe_stream`, on `LiveCallSession` start/end, and on load-test / benchmark stream legs. Thread-pool inference copies contextvars so a pass stays under its call. Qwen VAD tags `pass_kind=commit|interim`; Whisper tags `sliding_window`.
 - `RT_MASR_OBSERVE=0` disables it. No-op when no run session is open (pytest).
+
+---
+
+## 14. Model preflight
+
+### Problem
+
+A misspelled `default_model` / `RT_MASR_MODEL` / `--models` failed with a Python list of names, and a model that was not downloaded failed deep inside ONNX Runtime or Transformers with a file-not-found traceback that did not say how to fix it. Benchmark ids (`qwen3_onnx_int8_0.6b`) and registry names (`qwen3_onnx_0.6b_int8`) are easy to mix up.
+
+### Changes
+
+- New `src/core/model_check.py`: `check_registry_model` (server), `bench_entries_not_downloaded` / `bench_id_hint` (benchmark, load test), `missing_files` (moved from `check_models.py`), `registry_table` / `bench_table`, `download_command`.
+- Unknown name: "did you mean" (difflib) and a table of valid names with a `DOWNLOADED` column; the benchmark / load-test table also shows the registry name each id downloads as.
+- Not downloaded: missing files and `uv run python src/utils/download_utils.py --model <registry name>`.
+- Server startup stops with that message. Benchmark / load test: an explicit `--models` stops the run; a default run skips the missing models and continues. `run_loadtest.py --list` marks them `[NOT DOWNLOADED]`. The load test now validates `--models` against its own roster and says when an id exists in `bench_config.yaml` but not in the roster.

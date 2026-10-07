@@ -55,8 +55,13 @@ threads of a physical core). `--cpus N` / `--processes P` can shrink a smoke run
 
 **Which models:** `loadtest/configs/loadtest_config.yaml` `models:` is the roster (ids only). Each `id` must already exist
 in `benchmark/configs/bench_config.yaml` — that file maps the id to `backend` and `model_config` YAML. `--models a,b`
-selects a subset of the roster; it does not add an id that is missing from `loadtest_config.yaml`. Download weights
-before running (`src/utils/download_utils.py`).
+selects a subset of the roster; it does not add an id that is missing from `loadtest_config.yaml`. An unknown id prints
+"did you mean", the roster with registry names and a `DOWNLOADED` column, and says when the id exists in
+`bench_config.yaml` but not in the roster.
+
+Weights are checked before any worker starts. A model that is not downloaded prints the missing files and
+`uv run python src/utils/download_utils.py --model <registry name>`. In a default run it is skipped; if it was named with
+`--models`, the run stops. `--list` marks such models `[NOT DOWNLOADED]`.
 
 ## Safety on a shared machine
 

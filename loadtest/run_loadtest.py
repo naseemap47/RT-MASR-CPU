@@ -37,6 +37,9 @@ from loadtest.reporters.loadtest_reporter import LoadtestReporter
 from loadtest.runners.ramp import RampResult, run_ramp
 from loadtest.runners.worker_pool import InsufficientMemory, WorkerPool
 from loadtest.topology import available_cpus, cpu_set, split_cpus
+from src.core.model_check import (
+    bench_entries_not_downloaded, bench_id_hint, bench_table, unknown_name_message,
+)
 from src.core.runlog import current_run, start_run
 
 logger = logging.getLogger("rtmasr.loadtest")
@@ -175,10 +178,24 @@ def _run(args: argparse.Namespace, run) -> None:
     bench = yaml.safe_load(open(cfg["bench_config"]))
     entries = {c["id"]: c for c in bench["configs"]}
 
-    models = [m.strip() for m in args.models.split(",")] if args.models else None
-    unknown = [m for m in (models or []) if m not in entries]
+    roster = [m["id"] if isinstance(m, dict) else m for m in cfg.get("models", [])]
+    models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
+    unknown = [m for m in (models or []) if m not in roster]
     if unknown:
-        sys.exit(f"Unknown config id(s): {unknown}. Available: {sorted(entries)}")
+        hints = [bench_id_hint(unknown, entries.values())]
+        not_in_roster = [m for m in unknown if m in entries]
+        if not_in_roster:
+            hints.append(f"  {', '.join(not_in_roster)}: defined in bench_config.yaml but not in the "
+                         f"load-test roster; add it under `models:` in {os.path.relpath(config_path)}")
+        hints.append("Load-test ids come from `models:` in the load-test config; pass them as --models <id>[,<id>...]")
+        logger.error("\n%s\n", unknown_name_message(
+            "load-test model id", unknown, roster,
+            bench_table([entries[m] for m in roster if m in entries]),
+            where="--models", hint="\n".join(h for h in hints if h)))
+        sys.exit(1)
+    missing_def = [m for m in roster if m not in entries]
+    if missing_def:
+        sys.exit(f"Load-test model id(s) {missing_def} are not defined in {cfg['bench_config']}.")
 
     n_cpus = len(available_cpus())
     if args.cpus is not None:
@@ -195,11 +212,28 @@ def _run(args: argparse.Namespace, run) -> None:
     if not scenarios:
         sys.exit("No runs selected. Check --models and the load-test config.")
 
+    selected = list(dict.fromkeys(sc["model_id"] for sc in scenarios))
+    not_downloaded = bench_entries_not_downloaded([entries[m] for m in selected])
+    missing_ids = {e["id"] for e, _ in not_downloaded}
+
     if args.list:
         for sc in scenarios:
-            logger.info("%-15s %-28s %3s CPU threads  %s process(es)",
-                        sc["profile"], sc["model_id"], sc["vcpus"], sc["processes"])
+            logger.info("%-15s %-28s %3s CPU threads  %s process(es)%s",
+                        sc["profile"], sc["model_id"], sc["vcpus"], sc["processes"],
+                        "  [NOT DOWNLOADED]" if sc["model_id"] in missing_ids else "")
+        for _, msg in not_downloaded:
+            logger.warning("\n%s\n", msg)
         return
+
+    for _, msg in not_downloaded:
+        logger.error("\n%s\n", msg)
+    if not_downloaded:
+        if models:
+            sys.exit(1)
+        logger.warning("Skipping model(s) that are not downloaded: %s", ", ".join(sorted(missing_ids)))
+        scenarios = [sc for sc in scenarios if sc["model_id"] not in missing_ids]
+        if not scenarios:
+            sys.exit("No downloaded models left to load-test.")
 
     call_audio = [a for a in cfg["call"]["audio"] if os.path.exists(a)]
     if not call_audio:

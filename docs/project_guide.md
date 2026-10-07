@@ -33,7 +33,7 @@ file as if it were a phone call and streams the audio to a Python server over a 
    many one node can carry, and turns that into a sizing guide for 50-1,000 legs.
 
 Plus documents: `docs/arch/architecture.md`, `docs/how-streaming-works.md`, `docs/benchmark/*`,
-`docs/loadtest/*`, `docs/deployment.md` (production design).
+`docs/loadtest/*`, `docs/arch/deployment.md` (production design).
 
 **Two model families**
 
@@ -460,12 +460,12 @@ spaces; for zh remove all punctuation/symbol characters. Without it WER would pu
 |---|---|---|
 | What a "leg" does | a worker thread calls `transcribe()` on a whole file, back to back | a leg streams audio at real-time pace and runs the live server's stream logic |
 | Measures | throughput (audio seconds per wall second) | does every leg keep up with live speech |
-| Result in `final_result.md` | "about 4 live calls for INT8 0.6B" | the question the load test refines |
+| Result (final runs) | INT8 0.6B: 6.7x real time at 4 workers, RTF 0.59 per call (`docs/benchmark/final_result.md`) | INT8 / INT4 0.6B: **1 live leg** per box; Whisper tiny 3 / 2 (`docs/loadtest/final_result.md`) |
 
 Why they disagree: batch mode transcribes each complete 10 s file **once**. A live call re-transcribes the open
-window every second, so the compute per second of audio is several times larger, and each leg also has a latency
-requirement. So "throughput suggests 4" and "real-time streaming sustains 1-3 legs on the 16-thread laptop" are both true; they
-answer different questions. The first was an offline capacity figure, the second is what a live deployment needs.
+window every second, so the compute per second of audio is several times larger (2.3-3.7x for Qwen), and each leg also
+has a latency requirement. An earlier reading of the batch row as "about 4 live calls" was too high; batch throughput is an
+offline capacity figure, the streaming load test is what a live deployment needs.
 
 ### 7.2 The streaming concurrency runner (shared by benchmark and load test)
 
@@ -534,16 +534,18 @@ text. Leg start times are spread over a 6 s window (`stagger = spread / n`) beca
 
 Machine: AMD Ryzen 7 6800H, 8 cores / 16 threads, 15 GB RAM, shared with an IDE and browser (so noisy).
 
-Saturation on this whole machine (16 threads, 1 process) at the 2 s SLO, conversational / dense (run `20261007T170448Z`,
-all four confirmed):
+Saturation on this whole machine (16 threads, 1 process) at the 2 s SLO, conversational / dense (final run
+`20261007T202154Z`, all six confirmed; write-up in `docs/loadtest/final_result.md`):
 
 | Model | Max legs kept up | p95 staleness around the knee (conversational) |
 |---|---|---|
-| Qwen3-0.6B INT8 | **1** / 1 | 0.97 s at 1 leg, 3.14 s at 2 |
-| Whisper tiny INT8 | **3** / 2 | 0.93 s at 2 legs, 1.65 s at 3, 3.02 s at 4 |
+| Qwen3-0.6B INT4 | **1** / 1 | 0.83 s at 1 leg, 2.76 s at 2 |
+| Qwen3-0.6B INT8 | **1** / 1 | 0.98 s at 1 leg, 3.11 s at 2 |
+| Whisper tiny INT8 | **3** / 2 | 1.04 s at 2 legs, 1.51 s at 3, 2.70 s at 4 |
 
-Takeaways: capacity is **1-3 legs on this box**. Extra legs need extra boxes. An earlier whole-machine run measured
-Whisper 2 / 1 and Qwen 1 / 0, so treat every point as +/-1 leg.
+Takeaways: capacity is **1-3 legs on this box**. Extra legs need extra boxes. INT4 carries the same legs as INT8 with
+about 1.2 GB less memory and about 12% less compute per pass. The previous run (`20261007T170448Z`) found the same points;
+an earlier October 6 run measured Whisper 2 / 1 and Qwen 1 / 0, so treat every point as +/-1 leg.
 
 ### 8.5 The sizing model (`sizing/model.py`)
 
@@ -555,11 +557,11 @@ RAM    = ceil( (processes*weights + legs*MB_per_leg) * 1.2 + 2 GB OS )   # whole
 
 Worked example, Whisper tiny conversational, `l_sat = 3` on 16 CPU threads, 100 legs:
 `cap = 3 * 0.70 / 1.10 = 1.91`; `ceil(100 / 1.91) = 53`; spares `max(1, ceil(5.3)) = 6`; **59 boxes** (16 threads, ~4 GB each).
-For Qwen `l_sat = 1` gives `cap = max(1, 0.64) = 1.0`, so 100 legs = 100 + 10 = **110 boxes** (~7 GB each).
+For Qwen `l_sat = 1` gives `cap = max(1, 0.64) = 1.0`, so 100 legs = 100 + 10 = **110 boxes** (~6 GB each for INT4, ~7 GB for INT8).
 
 Stricter flags (`run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fraction 0.2`): Whisper
 `cap = 3 * 0.6 / 1.25 = 1.44`, so 100 legs = 70 + 14 = **84 boxes**; Qwen stays on the one-leg floor, 100 + 20 = **120 boxes**.
-Full table in `docs/loadtest/loadtest.md`.
+Full tables in `docs/loadtest/loadtest.md`; sizing for 50-1,000 legs with measured vs extrapolated tags in `docs/loadtest/sizing_guide.md`.
 
 Other parts: `memory_fit` (least-squares MB per leg over healthy levels), `fit_usl` (Universal Scalability Law
 `C(v) = lambda*v / (1 + sigma*(v-1) + kappa*v*(v-1))` fitted by linear least squares on `v/C` to the measured thread
@@ -718,21 +720,21 @@ Latency is one pass's duration. Staleness is when the pass finished minus when t
 it includes queueing and the hop. A node can have a fast pass and still be stale if passes queue up.
 
 **Q28. Why is the capacity so low (1-3 legs per box)?**
-Streaming re-transcribes windows every second; with one leg a pass already has a P95 pass-RTF of about 0.17-0.37 on the whole
-machine (Qwen at two legs jumps to about 0.96, Whisper at four to about 0.76), and
+Streaming re-transcribes windows every second; with one leg a pass already has a P95 pass-RTF of about 0.19-0.36 on the whole
+machine (Qwen at two legs jumps to about 0.6-0.9, Whisper at four to about 0.58), and
 the shared engine means legs compete for the same cores. It is an architectural cost (re-transcription), not a hardware
 problem. Cross-leg batching or a streaming-native model would change it; neither is implemented or credited.
 
 **Q29. Why not just multiply one leg's cost by N?**
 Per-leg cost is not constant: spin-waiting threads inflate CPU time (Whisper's CPU-seconds per audio-second fall from
-6.9 at one leg to 3.7 at three), throughput did not scale with cores in earlier pinned-width runs (Qwen 4 = 8 = 16 threads
+6.9 at one leg to 3.5 at three), throughput did not scale with cores in earlier pinned-width runs (Qwen 4 = 8 = 16 threads
 = 1 leg), and queueing makes latency rise sharply near saturation. So the model starts from the measured knee
 and applies headroom, overhead, spares and memory rules.
 
 **Q30. What does the 70% headroom mean?**
 Boxes are planned at 70% of the measured saturation (then divided by 1.1 for serving overhead), because staleness is flat
-and then climbs steeply (Qwen: 0.97 s p95 staleness with one leg, 3.14 s with two; Whisper: 0.93 s at two legs,
-1.65 s at three, 3.02 s at four).
+and then climbs steeply (Qwen INT8: 0.98 s p95 staleness with one leg, 3.11 s with two; Whisper: 1.04 s at two legs,
+1.51 s at three, 2.70 s at four).
 
 **Q31. How confident are the 500 and 1,000 leg numbers?**
 Low to very low. They extrapolate from 1-3 measured legs on one laptop, so each row says EXTRAPOLATED with a confidence
@@ -753,9 +755,10 @@ A leg whose staleness exceeds 8 s is marked aborted and stops, so an overloaded 
 count as kept up.
 
 **Q35. Why did a repeat run give different numbers?**
-The first whole-machine run measured Whisper 2 / 1 and Qwen 1 / 0 legs (conversational / dense); the newest measured
-Whisper 3 / 2 and Qwen 1 / 1. Nothing in the inference code changed: the laptop is shared and thermally limited, and
-Whisper's saturation level sits at 1.65-1.69 s against a 2 s threshold, so small noise flips one leg. That is why the
+The first whole-machine run (October 6) measured Whisper 2 / 1 and Qwen 1 / 0 legs (conversational / dense); the two later
+runs (`20261007T170448Z` and the final `20261007T202154Z`) both measured Whisper 3 / 2 and Qwen 1 / 1 (INT4 too, in the final run).
+Nothing in the inference code changed: the laptop is shared and thermally limited, and Whisper's saturation level sits at
+1.51-1.63 s against a 2 s threshold, so small noise flips one leg. That is why the
 guide shows a +/-1 leg range and why a conservative plan repeats the run and uses the lower result.
 
 ### Production
@@ -763,7 +766,7 @@ guide shows a +/-1 leg range and why a conservative plan repeats the run and use
 **Q36. How would this accept real phone audio?**
 Through a media gateway that terminates RTP/WebRTC, decodes G.711/Opus, resamples, splits channels into one leg each and
 sends framed PCM with sequence numbers; the server already supports declared sample rate, channels and Int16 PCM.
-Details and the code gaps (message-count trigger, `_total_samples`, unbounded queue) are in `docs/deployment.md`.
+Details and the code gaps (message-count trigger, `_total_samples`, unbounded queue) are in `docs/arch/deployment.md`.
 
 **Q37. What happens when capacity is exceeded?**
 Every leg on the box degrades together. Qwen: lag grows without bound because there is no skip-ahead and the queue is
@@ -772,7 +775,7 @@ unbounded; Whisper: latency rises but backlog does not. Hence admission control 
 
 **Q38. How would you scale out?**
 More identical edge boxes (one ASR process per box), calls sticky to a box, N+1 spares, add a box on staleness and
-pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is in `docs/deployment.md` section 9.
+pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is in `docs/arch/deployment.md` section 9.
 
 ---
 
@@ -786,10 +789,10 @@ pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is 
 6. **Whisper hop counting uses raw bytes** (`_total_samples`), wrong for non-16 kHz or multi-channel input; fine for the browser.
 7. **Default model** in `config.yaml` is `qwen3_onnx_0.6b_int4`, which has the empty-output issue on one clip with auto-detect; check `config/config.yaml` before the demo.
 8. **Load test**: one laptop CPU, shared machine, whole-leg resolution (1-3 legs), repeated runs differ by one leg
-   (Whisper conversational was 2 legs in the October 6 run and 3 in `20261007T170448Z`, which moves 100 legs between 87 and
-   59 boxes), clean English speech only, 30 s calls.
+   (Whisper conversational was 2 legs in the October 6 run and 3 in `20261007T170448Z` and `20261007T202154Z`, which moves
+   100 legs between 87 and 59 boxes), clean English speech only, 30 s calls.
 9. **Sizing for 50+ legs is extrapolated**, scale-out across identical edge boxes is assumed, batching not credited.
-10. **Production pieces are designs**, not code (`docs/deployment.md`).
+10. **Production pieces are designs**, not code (`docs/arch/deployment.md`).
 
 ---
 
@@ -835,8 +838,8 @@ uv run pytest benchmark/tests loadtest/tests tests/test_live_call_session.py tes
    the buffer.
 3. Switch the model (`RT_MASR_MODEL=whisper_int8_tiny`) and show the label change (sliding window vs VAD utterances).
 4. Open `benchmark/results/..._summary.md` and `docs/benchmark/final_result.md`: RTF, WER, the INT4 caveat.
-5. Open `loadtest/results/<...>_sizing_guide.md`: the tables, the MEASURED vs EXTRAPOLATED tags, and the explanation of why
-   capacity is only 1-3 legs per node.
+5. Open `docs/loadtest/final_result.md` and `docs/loadtest/sizing_guide.md`: the tables, the MEASURED vs EXTRAPOLATED tags,
+   and the explanation of why capacity is only 1-3 legs per node. `docs/report/technical_report.md` has the full write-up with figures.
 
 ### Self-check (can you answer without notes?)
 

@@ -5,7 +5,8 @@ code today**: components, the per-call streaming flow, the WebSocket protocol,
 the latency metrics and where their timestamps are captured, the engine
 contract, configuration resolution, and AI inference traces. Historical design changes are in
 [`changes.md`](changes.md); the benchmark harness is described in
-[`../benchmark/benchmarking.md`](../benchmark/benchmarking.md).
+[`../benchmark/benchmarking.md`](../benchmark/benchmarking.md). The overview of the POC together with the
+recommended production architecture is [`system_architecture.md`](system_architecture.md).
 
 ---
 

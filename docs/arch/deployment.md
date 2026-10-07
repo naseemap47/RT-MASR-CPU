@@ -3,7 +3,8 @@
 How the RT-MASR-CPU proof of concept would be taken from "a browser plays a WAV file" to "live telephony audio
 transcribed on a CPU fleet". It covers real audio ingestion, silence / end-of-utterance / long speech /
 interruptions / network jitter, the production headroom target and what happens when capacity is exceeded, and the
-horizontal scaling plan with node counts.
+horizontal scaling plan with node counts. A one-document overview of the POC and the recommended production
+architecture is [`system_architecture.md`](system_architecture.md).
 
 > **Status labels used throughout**
 >
@@ -12,7 +13,7 @@ horizontal scaling plan with node counts.
 > | **IMPLEMENTED** | exists in the repository today (file referenced) |
 > | **GAP** | the POC does something simpler or wrong for production; the fix is described |
 > | **PROPOSED** | new component or behaviour that does not exist yet |
-> | **MEASURED / EXTRAPOLATED** | taken from the load test and [`loadtest/sizing_guide.md`](loadtest/sizing_guide.md) |
+> | **MEASURED / EXTRAPOLATED** | taken from the load test and [`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) |
 >
 > Nothing in sections 3 to 7 has been run against real telephony traffic. Section 8 and 9 numbers come from one
 > laptop CPU and are extrapolated beyond 1-3 legs per node (see the limitations in section 11).
@@ -292,16 +293,19 @@ flowchart LR
 One leg = one stream at real-time pace. A box "keeps up" while every leg has p95 staleness and end-of-call lag of 2 s or less.
 Staleness is how far the live transcript trails the speaker, queueing included.
 
-Whole machine (16 threads, one process), run `20261007T170448Z`, every saturation point re-confirmed:
+Whole machine (16 threads, one process), run `20261007T202154Z` ([final results](../loadtest/final_result.md)), every saturation point re-confirmed:
 
 | Model, profile | Max legs kept up | Latency vs load (stale P95 / pass RTF P95) |
 |---|---|---|
-| Whisper tiny INT8, conversational | 3 | 1 leg 0.91 s / 0.17, 2 legs 0.93 s / 0.32, 3 legs 1.65 s / 0.43, **4 legs 3.02 s / 0.76, end lag 3.74 s (fails)** |
-| Whisper tiny INT8, dense | 2 | 1 leg 0.90 s / 0.22, 2 legs 1.40 s / 0.30, **3 legs 2.35 s / 0.53 (fails)** |
-| Qwen3-0.6B INT8, conversational | 1 | 1 leg 0.97 s / 0.35, **2 legs 3.14 s / 0.96 (fails)** |
-| Qwen3-0.6B INT8, dense | 1 | 1 leg 0.99 s / 0.37, **2 legs 1.86 s / 0.65, end lag 2.64 s (fails)** |
+| Whisper tiny INT8, conversational | 3 | 1 leg 0.91 s / 0.19, 2 legs 1.04 s / 0.37, 3 legs 1.51 s / 0.43, **4 legs 2.70 s / 0.58, end lag 2.62 s (fails)** |
+| Whisper tiny INT8, dense | 2 | 1 leg 0.91 s / 0.23, 2 legs 1.54 s / 0.34, **3 legs 3.24 s / 0.59, end lag 5.82 s (fails)** |
+| Qwen3-0.6B INT8, conversational | 1 | 1 leg 0.98 s / 0.36, **2 legs 3.11 s / 0.80 (fails)** |
+| Qwen3-0.6B INT8, dense | 1 | 1 leg 0.95 s / 0.36, **2 legs 2.22 s / 0.73, end lag 2.41 s (fails)** |
+| Qwen3-0.6B INT4, conversational | 1 | 1 leg 0.83 s / 0.31, **2 legs 2.76 s / 0.82 (fails)** |
+| Qwen3-0.6B INT4, dense | 1 | 1 leg 0.90 s / 0.31, 2 legs 1.72 s / 0.60 in the ramp but **2.30 s / 0.92 in the confirm run (fails)**, 3 legs 8.98 s / 1.23 |
 
-An earlier whole-machine run measured one leg less for Whisper (2 / 1) and for Qwen dense (0): treat every point as +/-1 leg.
+The previous whole-machine run (`20261007T170448Z`, INT8 and Whisper only) found the same saturation points. An earlier October 6
+run measured one leg less for Whisper (2 / 1) and for Qwen dense (0): treat every point as +/-1 leg.
 Staleness is never below about 0.9-1.0 s even for a single leg: that is the cost of the hop and pass time, so a latency SLO
 below about 1.5 s is not achievable with these engines regardless of capacity.
 
@@ -311,19 +315,19 @@ Capacity is exceeded when the time to serve one pass of one leg becomes longer t
 passes 1). The consequences follow from the code, and the load test saw them:
 
 1. **It is not graceful per call; every leg on the node degrades together.** All legs share the same cores and one engine, so
-   adding one leg too many slows every leg's passes. Measured: Qwen went from 0.97 s to **3.1 s** staleness for the whole node
+   adding one leg too many slows every leg's passes. Measured: Qwen INT8 went from 0.98 s to **3.1 s** staleness (INT4 0.83 s to 2.8 s)
    when a second leg arrived (5.6 s in an earlier run pinned to 4 threads). The extra leg is not rejected; it makes the existing calls worse.
 2. **Qwen path: unbounded lag.** The handler awaits each inference before reading the next frame and processes queued frames in
    order, with no skip-ahead and an unbounded queue. Staleness and **end-of-call lag grow with call length** (up to 5.9-6.9 s
    at 30 s calls in earlier pinned runs; the harness aborts legs at 8 s to stop the test running for minutes). Memory in the per-leg queue
    grows with it.
 3. **Whisper path: latency instead of backlog.** `_drain_audio` skips to the newest audio, so the queue does not grow; instead
-   the transcript arrives later and with fewer intermediate hypotheses (staleness rose 0.91 -> 0.93 -> 1.65 -> 3.02 s from 1 to
+   the transcript arrives later and with fewer intermediate hypotheses (staleness rose 0.91 -> 1.04 -> 1.51 -> 2.70 s from 1 to
    4 conversational legs). Correctness degrades less than timeliness, but a sustained overload still ends in lost responsiveness.
 4. **Thread contention makes it worse than linear.** Passes from several legs oversubscribe the CPU. ONNX Runtime threads also
-   spin-wait, so CPU% is a poor overload signal: Whisper at its 3-leg limit showed only 60-61% CPU utilisation, Qwen at its
-   1-leg limit 42-61%. **Alert on pass latency and staleness, not on CPU%.**
-5. **Memory is not the trigger.** Per-leg memory is about 120-310 MB (regression) against weights of 1.0 GB (Whisper tiny) and 3.7 GB (Qwen);
+   spin-wait, so CPU% is a poor overload signal: Whisper at its 3-leg limit showed only 57-61% CPU utilisation, Qwen at its
+   1-leg limit 38-62%. **Alert on pass latency and staleness, not on CPU%.**
+5. **Memory is not the trigger.** Per-leg memory is about 110-300 MB (regression) against weights of 1.0 GB (Whisper tiny), 2.5 GB (Qwen INT4) and 3.7-3.8 GB (Qwen INT8);
    CPU time is the constraint long before RAM.
 6. **No automatic recovery.** Without admission control the node stays saturated until calls end. New calls routed to it deepen
    the problem.
@@ -340,7 +344,7 @@ nodes                  = ceil(legs / planning legs per node) + max(1, ceil(10% x
 
 Why that number rather than 80-90%:
 
-- The measured knee is steep: one leg over saturation took Qwen from 0.97 s to 3.1 s and Whisper from 1.65 s to 3.0 s. At 1-3 legs per node, "one more leg" is
+- The measured knee is steep: one leg over saturation took Qwen INT8 from 0.98 s to 3.1 s and Whisper from 1.51 s to 2.7 s. At 1-3 legs per node, "one more leg" is
   33-100% more load, so there is little room between "healthy" and "collapsed".
 - Real traffic is bursty (call starts cluster, dense speech spikes); the load test spread call starts over 6 s and used
   clean speech.
@@ -352,7 +356,7 @@ How the target is enforced:
 |---|---|
 | **Per-box hard cap** | Never admit more than the measured saturation of the box (`max_legs` on the 16-thread test box: 1 for Qwen3; 3 for Whisper tiny with conversational traffic, 2 if speech is dense or unknown). Beyond it every existing call degrades |
 | **Site average occupancy** | Keep the set of boxes at or below about 64-70% of the sum of `max_legs` (least-loaded placement keeps most boxes at or below the average) |
-| **Scale-out trigger** | Add an identical edge box when occupancy is above 60% for 2-3 minutes, or free slots fall below the spare reserve. Start-up is slow (weights load 3-5 s plus warm-up), so scale on trend, not on emergency |
+| **Scale-out trigger** | Add an identical edge box when occupancy is above 60% for 2-3 minutes, or free slots fall below the spare reserve. Start-up is slow (weights load 2-5 s plus warm-up), so scale on trend, not on emergency |
 | **Health signals per box** | `staleness p95` and `pass RTF p95` over a 30 s window, in-flight/queued pass count, `active_legs / max_legs`. Do **not** use CPU% |
 | **Alert thresholds** | Warn at staleness p95 above 1.5 s or pass RTF p95 above 0.5; stop admitting at above 2 s or RTF above 0.7; shed at above 3 s |
 
@@ -379,7 +383,7 @@ This project deploys on **edge CPUs**. Extra capacity is more identical boxes on
 ### 9.1 Why one box is not enough
 
 Measured on a whole 16-thread box, one process: **at most 1-3 simultaneous legs at the 2 s SLO** (Whisper tiny: 3 conversational /
-2 dense; Qwen3-0.6B INT8: 1 / 1). After headroom and serving overhead that is about 1-2 legs per box. Any real site, even 50 legs,
+2 dense; Qwen3-0.6B INT8 and INT4: 1 / 1). After headroom and serving overhead that is about 1-2 legs per box. Any real site, even 50 legs,
 therefore needs several boxes, and the unit of scale is **another edge box**, not a bigger chip.
 
 | Finding (MEASURED) | Consequence for the design |
@@ -391,23 +395,23 @@ therefore needs several boxes, and the unit of scale is **another edge box**, no
 
 ### 9.2 Edge-box specification
 
-| | Whisper tiny INT8 | Qwen3-0.6B INT8 |
-|---|---|---|
-| Layout | **whole box** (16 CPU threads measured), one process, ORT threads = logical CPUs | same |
-| RAM needed | about 3.5 GB (1.0 GB weights + about 0.13 GB/leg, x1.2, + 2 GB OS) | about 6.7 GB (3.7 GB weights + about 0.3 GB/leg, x1.2, + 2 GB OS) |
-| RAM to provision | **4 GB** (rounded-up need) | **7 GB** |
-| Planning capacity | 1.91 conversational legs / box (hard cap 3); 1.27 dense (hard cap 2) | 1.0 leg / box (hard cap 1) |
-| Pinning | ORT `num_threads` equal to the box's logical CPUs; no other heavy process on the box | same |
+| | Whisper tiny INT8 | Qwen3-0.6B INT4 | Qwen3-0.6B INT8 |
+|---|---|---|---|
+| Layout | **whole box** (16 CPU threads measured), one process, ORT threads = logical CPUs | same | same |
+| RAM needed | about 3.5 GB (1.0 GB weights + about 0.11 GB/leg, x1.2, + 2 GB OS) | about 5.3 GB (2.5 GB weights + about 0.3 GB/leg, x1.2, + 2 GB OS) | about 6.7 GB (3.8 GB weights + about 0.3 GB/leg, x1.2, + 2 GB OS) |
+| RAM to provision | **4 GB** (rounded-up need) | **6 GB** | **7 GB** |
+| Planning capacity | 1.91 conversational legs / box (hard cap 3); 1.27 dense (hard cap 2) | 1.0 leg / box (hard cap 1) | 1.0 leg / box (hard cap 1) |
+| Pinning | ORT `num_threads` equal to the box's logical CPUs; no other heavy process on the box | same | same |
 
 ### 9.3 Estimated number of edge boxes (EXTRAPOLATED, confidence Low to Very low)
 
-Numbers come from [`loadtest/sizing_guide.md`](loadtest/sizing_guide.md): the measured saturation point x 0.70 headroom / 1.10
+Numbers come from [`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md): the measured saturation point x 0.70 headroom / 1.10
 overhead, plus at least 10% spare boxes. **Edge boxes** shows the central estimate and, in parentheses, the range if the true
 per-box capacity is one leg higher or lower than the 1-leg resolution of the test. RAM is per box, not a fleet total.
 
 **Conversational profile (about half of each call is speech): the planning case**
 
-| Concurrent legs | Whisper tiny: boxes (16 threads, 4 GB) | Qwen3-0.6B: boxes (16 threads, 7 GB) |
+| Concurrent legs | Whisper tiny: boxes (16 threads, 4 GB) | Qwen3-0.6B INT4 or INT8: boxes (16 threads, 6 GB INT4 / 7 GB INT8) |
 |---|---|---|
 | 50 | 30 (22-44) | 55 (44-55) |
 | 60 | 36 (27-53) | 66 (53-66) |
@@ -416,11 +420,11 @@ per-box capacity is one leg higher or lower than the 1-leg resolution of the tes
 | 500 | 289 (217-433) | 550 (433-550) |
 | 1,000 | 577 (433-865) | 1,100 (865-1,100) |
 
-Target at the operating load (MEASURED): Whisper pass RTF <= 0.35, P95 staleness <= 1.0 s; Qwen3 pass RTF <= 0.35, P95 staleness <= 1.0 s.
+Target at the operating load (MEASURED): Whisper pass RTF <= 0.40, P95 staleness <= 1.1 s; Qwen3 INT4 <= 0.35 / <= 0.9 s; Qwen3 INT8 <= 0.40 / <= 1.0 s.
 
 **Dense profile (nearly continuous speech): the upper bound**
 
-| Concurrent legs | Whisper tiny: boxes (16 threads, 4 GB) | Qwen3-0.6B: boxes (16 threads, 7 GB) |
+| Concurrent legs | Whisper tiny: boxes (16 threads, 4 GB) | Qwen3-0.6B INT4 or INT8: boxes (16 threads, 6 GB INT4 / 7 GB INT8) |
 |---|---|---|
 | 50 | 44 (30-55) | 55 (44-55) |
 | 60 | 53 (36-66) | 66 (53-66) |
@@ -429,14 +433,19 @@ Target at the operating load (MEASURED): Whisper pass RTF <= 0.35, P95 staleness
 | 500 | 433 (289-550) | 550 (433-550) |
 | 1,000 | 865 (577-1,100) | 1,100 (865-1,100) |
 
-Targets (dense): Whisper RTF <= 0.30 / P95 <= 1.4 s, Qwen RTF <= 0.40 / P95 <= 1.0 s.
+Targets (dense): Whisper RTF <= 0.35 / P95 <= 1.6 s, Qwen3 INT4 <= 0.35 / <= 0.9 s, Qwen3 INT8 <= 0.40 / <= 1.0 s.
+
+Per-target CPU threads, physical cores and fleet RAM, and the measured-vs-extrapolated breakdown, are in
+[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md).
 
 How to read this honestly:
 
 - **About 1-3 conversational legs per 16-thread box before headroom** is the measured cost of this architecture on this CPU.
   100 legs is tens to a hundred identical edge boxes. That is a property of re-transcribing windows every second, not of the hardware.
-- **Whisper vs Qwen3.** Qwen3-0.6B INT8 is more accurate in the benchmark (EN WER 0.037 vs 0.130 for Whisper tiny; Whisper tiny is poor
-  on Mandarin). Whisper degrades more gracefully when overloaded (section 8.2); Qwen is more accurate but needs the skip-ahead fix first.
+- **Whisper vs Qwen3.** Qwen3-0.6B is more accurate in the benchmark (EN WER 0.037 for INT8 vs 0.130 for Whisper tiny;
+  Whisper tiny is poor on Mandarin). INT4 needs the same number of boxes as INT8 with 1 GB less RAM per box and about 12% less
+  compute per pass; its EN WER is 0.038 once the one clip it returned empty is excluded (set the language explicitly or retry on
+  empty output, see [`../benchmark/final_result.md`](../benchmark/final_result.md), section 4). Whisper degrades more gracefully when overloaded (section 8.2); Qwen is more accurate but needs the skip-ahead fix first.
   Choose on accuracy for the target languages, measured on real 8 kHz call audio.
 - **Blast radius** is tiny: one box loses 1-3 legs, so a box failure is a small event as long as spare capacity exists.
 - Rows for 50 legs and above are **extrapolations** of 1-3 measured legs; confidence falls from Low (50-200) to Very low (500+).
@@ -451,7 +460,7 @@ How to read this honestly:
 | **Adding capacity** | Scale on occupancy (`sum(active_legs) / sum(max_legs)`) and trend, not CPU%. Bring another pre-warmed edge box online above 60% occupancy; take one out only above the spare reserve and only by draining |
 | **Rolling deploys** | Drain: stop admitting, let calls finish (or move *new* calls first and recycle boxes as they empty). Never kill a box with active legs unless the call can resume |
 | **Box failure** | Gateway detects the closed WebSocket, asks the router for a new box and resumes media; text already published to the bus stays valid, recognition restarts from the next utterance (a few seconds of speech may be lost unless the gateway replays its last few seconds from its buffer) |
-| **Warm capacity** | Model load takes 3-5 s here, so pre-warm: a box joins the pool only after the load + warm-up pass completes (`/api/health: model_ready`) |
+| **Warm capacity** | Model load takes 2-5 s here, so pre-warm: a box joins the pool only after the load + warm-up pass completes (`/api/health: model_ready`) |
 | **Overflow** | When every box is full, route to a deferred/batch queue (transcribe the recording after the call) rather than degrade live calls |
 
 ### 9.5 Levers that would change these numbers (NOT credited anywhere above)
@@ -463,7 +472,7 @@ How to read this honestly:
 | Streaming-native model (incremental encoder, no window re-encode) | Removes the re-transcription multiplier | model change |
 | INT8 on AVX-512 VNNI / AMX hardware | Higher per-core throughput than this laptop CPU | unmeasured |
 | Gateway VAD dropping silence | Lowers speech density towards the conversational profile | proposed (section 4) |
-| Larger SLO (3 s instead of 2 s) | At 2 s the failing Whisper 8-thread level sat at 2.16 s, so capacity is sensitive to the SLO | design choice |
+| Larger SLO (3 s instead of 2 s) | Only the dense Qwen 2-leg runs would pass (worst leg 2.25-2.39 s); conversational Qwen and Whisper would not change | design choice |
 
 ---
 

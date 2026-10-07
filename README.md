@@ -149,8 +149,8 @@ logs/                       Per-run capture (git-ignored): logs/<pipeline>/<UTC>
 - Python **3.12** (pinned in `.python-version`).
 - [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`.
 - `curl` and `tar` (used to fetch the Whisper tarballs).
-- RAM: ~4 GB for the ONNX engine alone; the Transformers 1.7B engine peaked at
-  ~10 GB RSS during benchmarking. 16 GB is comfortable.
+- RAM: ~3-4 GB for the Qwen3-0.6B ONNX engine alone (INT4 / INT8); in the final benchmark the
+  Transformers 1.7B engine peaked at ~6.3 GB RSS and Whisper medium at ~10.4 GB. 16 GB is comfortable.
 - Disk: ~2.5 GB for the ONNX model; ~14 GB for all Qwen3 models plus Whisper
   INT8 (see the table below); plus several GB for PyTorch.
 
@@ -444,17 +444,24 @@ up (staleness, end lag, max legs kept up). `--concurrency-mode batch` runs the
 older offline test where each "leg" is a worker making back-to-back
 `transcribe()` requests.
 
-Sample results from `benchmark/results/20261004T095157Z_summary.md` (8 physical
-/ 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s; the
-throughput column is from the older batch-mode concurrency test):
+Final results from run `20261005T173127Z` (8 physical / 16 logical cores, 14.9 GB RAM; 7 files, 252 s of EN/ZH/ID
+audio per config; the throughput column is from the batch-mode concurrency test). Curated write-up:
+[`docs/benchmark/final_result.md`](docs/benchmark/final_result.md).
 
-| Config | Load | Latency P50 | RTF | WER | Throughput @ 4 legs |
-|---|---|---|---|---|---|
-| Qwen3-0.6B ONNX INT8 | 3.7 s | 2.27 s | 0.21 | 0.036 | 6.3 audio-h/h |
-| Qwen3-0.6B Transformers BF16 | 5.8 s | 6.72 s | 0.64 | 0.036 | 1.8 audio-h/h |
-| Qwen3-1.7B Transformers BF16 | 1.0 s* | 12.99 s | 1.25 | 0.000 | 1.0 audio-h/h |
+| Config | Overall RTF | Latency P50 (10.4 s EN clip) | EN WER | ZH CER\* | Peak RSS | Batch throughput @ 4 workers |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B ONNX INT8 | 0.151 | 2.22 s | 0.037 | 0.013 | 5.1 GB | 6.7x real time |
+| Qwen3-0.6B ONNX INT4 | 0.141† | –† | 0.038† | 0.000 | 3.9 GB | not valid† |
+| Qwen3-1.7B ONNX INT4 | 0.245 | 3.04 s | 0.000 | 0.000 | 6.3 GB | 3.5x |
+| Qwen3-0.6B Transformers BF16 | 0.571 | 6.70 s | 0.037 | 0.000 | 3.7 GB | 1.7x |
+| Qwen3-1.7B Transformers BF16 | 1.070 | 12.86 s | 0.000 | 0.000 | 6.3 GB | 0.87x |
+| Whisper tiny INT8 | 0.245 | 3.20 s | 0.130 | 0.470 | 2.7 GB | 3.9x |
 
-\* Measured after the 0.6B run with weights in the page cache; not a true cold load.
+\* ZH references are unreviewed drafts taken from Qwen output, so ZH scores favour Qwen.
+† INT4 0.6B returned empty text on the 10.4 s EN clip (language auto-detect); RTF and WER exclude that clip. The streaming
+load test did not reproduce the failure.
+
+Batch throughput is not live-call capacity: the streaming load test below measured 1 live leg per box for Qwen3-0.6B.
 
 ---
 
@@ -494,13 +501,15 @@ uv run python loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --le
 - **Memory safety:** workers start one at a time against free RAM, and levels that would not fit are skipped
   (reserve and floor in `loadtest/configs/loadtest_config.yaml`).
 
-Result on the development laptop (8 cores / 16 threads, whole machine, one process): one box saturates at only
-**1-3 legs** (Whisper tiny INT8: 3 conversational / 2 dense; Qwen3-0.6B INT8: 1 / 1). Extra legs need extra boxes.
-Every 50+ leg row is extrapolated and labelled with its confidence. For example, 100 conversational legs is about
-59 Whisper-tiny boxes (range 44-87, ~4 GB each) or 110 Qwen3 boxes (~7 GB each), including 10% spares. Repeat runs
-differ by about one leg. See
-[`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) for the full tables (50/60/100/200/500/1,000 legs),
-assumptions and limitations, and [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) for how the pipeline works.
+Result on the development laptop (run `20261007T202154Z`; 8 cores / 16 threads, whole machine, one process): one box
+saturates at only **1-3 legs** (Whisper tiny INT8: 3 conversational / 2 dense; Qwen3-0.6B INT8 and INT4: 1 / 1).
+Extra legs need extra boxes. Every 50+ leg row is extrapolated and labelled with its confidence. For example,
+100 conversational legs is about 59 Whisper-tiny boxes (range 44-87, ~4 GB each) or 110 Qwen3 boxes (~6 GB each for
+INT4, ~7 GB for INT8), including 10% spares. Repeat runs differ by about one leg. See
+[`docs/loadtest/final_result.md`](docs/loadtest/final_result.md) for the measured results,
+[`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) for the sizing tables (50/100/200/500/1,000 legs),
+assumptions and the measured-vs-extrapolated breakdown, and [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md)
+for how the pipeline works.
 Re-run it on the target edge CPU before buying hardware.
 
 ---
@@ -579,9 +588,14 @@ jq -s 'group_by(.trace_id)[] | {trace_id: .[0].trace_id, runs: [.[] | {name, lat
 
 | Document | Contents |
 |---|---|
+| [`docs/arch/system_architecture.md`](docs/arch/system_architecture.md) | System architecture: POC as built plus the recommended production architecture, decisions and risks |
+| [`docs/arch/alternatives_analysis.md`](docs/arch/alternatives_analysis.md) | Alternative models, runtimes and streaming designs, trade-offs, and prioritised next experiments (data, metrics, Moonshine) |
 | [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract, AI traces |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
+| [`docs/report/technical_report.md`](docs/report/technical_report.md) | Technical report: methodology, environment, results, bottlenecks, sizing, recommendations (figures in `docs/report/figures/`) |
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
+| [`docs/benchmark/final_result.md`](docs/benchmark/final_result.md) | Final single-stream benchmark results (run `20261005T173127Z`) |
 | [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |
+| [`docs/loadtest/final_result.md`](docs/loadtest/final_result.md) | Final load-test results (run `20261007T202154Z`) |
 | [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | Edge-CPU sizing for 50-1,000 concurrent legs (identical boxes; measured vs extrapolated) |
-| [`docs/deployment.md`](docs/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |
+| [`docs/arch/deployment.md`](docs/arch/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |

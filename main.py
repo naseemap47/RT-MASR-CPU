@@ -506,12 +506,31 @@ async def websocket_call_stream(websocket: WebSocket):
                     state.language = data.get("language")
                     # ── T0: call-start ─────────────────────────────────
                     session.mark_call_start()
+
+                    # Optional {"audio": {"sample_rate", "channels", "encoding"}}.
+                    # Absent → the 16 kHz mono Int16 baseline is assumed.
+                    audio_fmt = data.get("audio") or {}
+                    try:
+                        accepted = session.set_input_format(
+                            sample_rate=audio_fmt.get("sample_rate"),
+                            channels=audio_fmt.get("channels"),
+                            encoding=audio_fmt.get("encoding"),
+                        )
+                    except (ValueError, TypeError) as exc:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": "unsupported_audio_format",
+                            "message": str(exc),
+                        })
+                        break
+
                     state.cumulative_text = ""
                     if streamer is not None:
                         streamer.reset(language=state.language or None)
                     await websocket.send_json({
                         "type": "call_ready",
                         "stream_mode": _stream_mode(),
+                        "audio_format": accepted,
                         "message": f"Model ready (Language: {state.language or 'Auto-Detect'}). Call leg starting.",
                     })
 

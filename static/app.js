@@ -373,10 +373,21 @@ document.addEventListener("DOMContentLoaded", () => {
     resetMetrics();
 
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    audioContext.decodeAudioData(selectedAudioArrayBuffer.slice(0), buf => {
-      decodedAudioBuffer = buf;
-      connectWebSocket();
-    });
+    audioContext.decodeAudioData(
+      selectedAudioArrayBuffer.slice(0),
+      buf => {
+        decodedAudioBuffer = buf;
+        connectWebSocket();
+      },
+      err => {
+        setState("error");
+        transcriptBox.innerHTML =
+          "<span class='placeholder'>Could not decode this file — the UI accepts Linear PCM WAV only.</span>";
+        fileInfo.textContent = `Decode failed: ${err && err.message ? err.message : "unsupported format"}`;
+        startBtn.disabled  = false;
+        hangupBtn.disabled = true;
+      },
+    );
   }
 
   function connectWebSocket() {
@@ -388,7 +399,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     websocket.onopen = () => {
       callStartTime = Date.now(); // clientT0
-      websocket.send(JSON.stringify({ type: "start_call", language: targetLang }));
+      websocket.send(JSON.stringify({
+        type: "start_call",
+        language: targetLang,
+        audio: { sample_rate: 16000, channels: 1, encoding: "pcm_s16le" },
+      }));
     };
 
     websocket.onmessage = event => {
@@ -422,6 +437,11 @@ document.addEventListener("DOMContentLoaded", () => {
         else transcriptBox.textContent = "Call completed.";
         if (data.metrics) applyMetrics(data.metrics);
         _teardown();
+
+      } else if (data.type === "error") {
+        setState("error");
+        transcriptBox.innerHTML = `<span class='placeholder'>${data.message || "Server rejected the call leg."}</span>`;
+        _teardown();
       }
     };
 
@@ -439,6 +459,23 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ── Audio streaming ──────────────────────────────────── */
+  /* Average every channel instead of keeping channel 0: on dual-channel call
+     recordings each leg can sit on its own channel, so dropping one loses a
+     speaker. decodeAudioData has already resampled to the 16 kHz baseline. */
+  function downmixToMono(audioBuffer) {
+    const channels = audioBuffer.numberOfChannels;
+    if (channels === 1) return audioBuffer.getChannelData(0);
+
+    const frames = audioBuffer.length;
+    const mono   = new Float32Array(frames);
+    for (let c = 0; c < channels; c++) {
+      const data = audioBuffer.getChannelData(c);
+      for (let i = 0; i < frames; i++) mono[i] += data[i];
+    }
+    for (let i = 0; i < frames; i++) mono[i] /= channels;
+    return mono;
+  }
+
   function streamAudioBuffer(audioBuffer) {
     if (audioContext) {
       if (audioContext.state === "suspended") audioContext.resume();
@@ -451,7 +488,7 @@ document.addEventListener("DOMContentLoaded", () => {
       audioSourceNode.start(0);
     }
 
-    const channelData = audioBuffer.getChannelData(0); // 16 kHz float32
+    const channelData = downmixToMono(audioBuffer); // 16 kHz float32, single channel
     const chunkSize   = 8000;  // 0.5s at 16 kHz
     let offset        = 0;
 

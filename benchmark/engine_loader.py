@@ -31,12 +31,25 @@ if _SRC_ROOT not in sys.path:
 SUPPORTED_BACKENDS = ("onnx", "transformers", "whisper")
 
 
+def _deep_update(base: dict, overrides: dict | None) -> dict:
+    """Merge ``overrides`` into ``base`` in place (nested dicts are merged, other values replaced)."""
+    for key, value in (overrides or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 def load_engine(config_entry: dict) -> Any:
     """
     Instantiate an ASR engine from a bench_config entry.
 
     Args:
-        config_entry: Dict with keys: id, backend, model_config.
+        config_entry: Dict with keys: id, backend, model_config, and optionally
+                      ``overrides`` (a dict deep-merged into the model YAML, e.g.
+                      ``{"engine": {"num_threads": 4}}`` -- used by the load test to
+                      size the ORT thread pool per process).
 
     Returns:
         A live engine instance with a .transcribe(audio_path) -> dict method.
@@ -57,6 +70,7 @@ def load_engine(config_entry: dict) -> Any:
 
     with open(model_config_path, "r") as f:
         model_cfg = yaml.safe_load(f)
+    _deep_update(model_cfg, config_entry.get("overrides"))
 
     if backend == "onnx":
         from engines.qwen3_onnx_engine import ONNXQwen3ASR
@@ -77,11 +91,30 @@ def load_engine(config_entry: dict) -> Any:
         )
 
 
+def stream_mode_for(config_entry: dict) -> str:
+    """
+    Live-server streaming strategy for a bench config (same rule as main.py):
+    Whisper backends use a sliding window, every Qwen3 backend VAD-cut utterances.
+    """
+    return "sliding_window" if config_entry.get("backend", "") == "whisper" else "vad_utterance"
+
+
+def streaming_settings(config_entry: dict) -> dict | None:
+    """The ``streaming:`` block of the entry's model YAML (None if absent/unreadable)."""
+    import yaml
+
+    path = config_entry.get("model_config", "")
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return (yaml.safe_load(f) or {}).get("streaming")
+
+
 def engine_factory(config_entry: dict) -> Callable[[], Any]:
     """
     Return a zero-argument factory function that creates a fresh engine.
 
-    Used by ConcurrencyRunner, which needs to instantiate engines on demand.
+    Used by the concurrency runners, which need to instantiate engines on demand.
 
     Args:
         config_entry: Same dict as load_engine().

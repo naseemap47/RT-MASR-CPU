@@ -44,6 +44,125 @@ class SummaryReporter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Concurrency sections ─────────────────────────────────────────────
+
+    @staticmethod
+    def _streaming_concurrency_section(results: list) -> list[str]:
+        out: list[str] = []
+        r0 = results[0]
+        out.append(
+            "> **One leg = one independently streamed audio source.** Each leg plays its audio "
+            f"into one shared engine in {_fmt(getattr(r0, 'chunk_s', 0.5), 1)} s chunks at real-time pace, "
+            "using the live server's stream logic (Whisper: sliding window; Qwen3: VAD-cut utterances). "
+            "N legs = N calls streaming at once.\n"
+        )
+        out.append(
+            "> **Kept up** = legs whose p95 staleness and end-of-call lag both stayed within "
+            f"{_fmt(getattr(r0, 'lag_threshold_s', 2.0), 1)} s, with no errors. "
+            "**Staleness** = pass finish time minus arrival time of the newest audio it covered "
+            "(how far the transcript trails the speaker, queueing included). "
+            "**End lag** = end of audio until the final transcript is committed. "
+            "**Pass RTF** = pass latency / audio seconds that pass covered. "
+            "**Text** = legs that produced a non-empty transcript (fewer than Legs means the numbers "
+            "are suspect).\n"
+        )
+        if any(abs(getattr(c, "pace", 1.0) - 1.0) > 1e-9 for c in results):
+            out.append("> **Warning: not played at real-time pace; latency and lag are not meaningful.**\n")
+
+        rows = []
+        for cr in results:
+            ps = getattr(cr, "pass_latency_stats", {})
+            rf = getattr(cr, "pass_rtf_stats", {})
+            st = getattr(cr, "staleness_stats", {})
+            ft = getattr(cr, "first_text_stats", {})
+            el = getattr(cr, "end_lag_stats", {})
+            sm = getattr(cr, "system_metrics", {})
+            cpu = sm.get("overall_cpu_pct", {})
+            n = getattr(cr, "n_legs", 0)
+            rows.append([
+                getattr(cr, "config_id", "?"),
+                getattr(cr, "stream_mode", "?"),
+                str(n),
+                f"{getattr(cr, 'legs_kept_up', 0)}/{n}",
+                _fmt(ps.get("p50", 0), 3) + "s",
+                _fmt(ps.get("p95", 0), 3) + "s",
+                _fmt(rf.get("p95", 0), 3),
+                _fmt(st.get("p50", 0), 2) + "s",
+                _fmt(st.get("p95", 0), 2) + "s",
+                _fmt(st.get("max", 0), 2) + "s",
+                _fmt(ft.get("mean", 0), 2) + "s",
+                _fmt(el.get("max", 0), 2) + "s",
+                f"{getattr(cr, 'legs_with_text', 0)}/{n}",
+                str(getattr(cr, "error_count", 0)),
+                _fmt(cpu.get("mean", 0), 0) + "%",
+                _fmt(sm.get("peak_rss_mb", 0), 0) + " MB",
+            ])
+        out.append(_table(
+            ["Config", "Mode", "Legs", "Kept up", "Pass P50", "Pass P95", "Pass RTF P95",
+             "Stale P50", "Stale P95", "Stale Max", "First Text (mean)", "End Lag (max)",
+             "Text", "Errors", "CPU Mean", "Peak RSS"],
+            rows,
+        ) + "\n")
+
+        # Capacity per config: highest tested level at which *every* leg kept up
+        # (and the levels below it also did).
+        per_cfg: dict[str, list] = {}
+        for cr in results:
+            per_cfg.setdefault(getattr(cr, "config_id", "?"), []).append(cr)
+        rows = []
+        for cfg_id, crs in per_cfg.items():
+            crs = sorted(crs, key=lambda c: getattr(c, "n_legs", 0))
+            best = 0
+            for cr in crs:
+                if getattr(cr, "legs_kept_up", 0) == getattr(cr, "n_legs", 0) and cr.n_legs > 0:
+                    best = cr.n_legs
+                else:
+                    break
+            tested = ", ".join(str(getattr(c, "n_legs", 0)) for c in crs)
+            rows.append([cfg_id, str(best) if best else "none", tested])
+        out.append("### Concurrent live legs supported (all legs kept up)\n")
+        out.append(_table(["Config", "Max Legs Kept Up", "Levels Tested"], rows) + "\n")
+        return out
+
+    @staticmethod
+    def _batch_concurrency_section(results: list) -> list[str]:
+        out: list[str] = []
+        out.append(
+            "> **Batch (offline) mode:** N worker threads call `transcribe()` back to back on one shared "
+            "engine (legs x rounds requests). Each leg is a *worker*, not a live stream, and nothing is "
+            "paced at real time, so this measures raw capacity, not whether live calls keep up. "
+            "Throughput = audio seconds transcribed per wall-clock second (x real-time, aggregate "
+            "across all legs). RTF is per request.\n"
+        )
+        rows = []
+        for cr in results:
+            cfg   = getattr(cr, "config_id", "?")
+            legs  = str(getattr(cr, "n_legs", 0))
+            ls    = getattr(cr, "latency_stats", {})
+            rs    = getattr(cr, "rtf_stats", {})
+            thru  = _fmt(getattr(cr, "throughput_audio_hours_per_wall_hour", 0), 2)
+            wall  = _fmt(getattr(cr, "wall_elapsed_s", 0.0), 1) + "s"
+            nreq  = str(getattr(cr, "n_calls", 0))
+            errs  = str(getattr(cr, "error_count", 0))
+            sm    = getattr(cr, "system_metrics", {})
+            prss  = _fmt(sm.get("peak_rss_mb", 0), 0)
+            rows.append([
+                cfg, legs, nreq, wall,
+                _fmt(ls.get("p50",  0), 3)+"s",
+                _fmt(ls.get("p95",  0), 3)+"s",
+                _fmt(ls.get("p99",  0), 3)+"s",
+                _fmt(rs.get("mean", 0), 3),
+                thru+"x",
+                errs,
+                prss+" MB",
+            ])
+        out.append(_table(
+            ["Config", "Legs (workers)", "Requests", "Wall", "Lat P50", "Lat P95", "Lat P99",
+             "RTF Mean", "Throughput", "Errors", "Peak RSS"],
+            rows
+        ) + "\n")
+        return out
+
     def render(self, all_results: dict) -> str:
         """
         Render all benchmark results to a Markdown summary.
@@ -242,40 +361,15 @@ class SummaryReporter:
 
         # ── Concurrency ───────────────────────────────────────────────────
         concurrency_results = all_results.get("concurrency", [])
+        stream_results = [c for c in concurrency_results if hasattr(c, "stream_mode")]
+        batch_results = [c for c in concurrency_results if not hasattr(c, "stream_mode")]
         lines.append("## Concurrency Scaling\n")
-        lines.append("> Every level runs the same audio workload on one shared engine. "
-                     "Throughput = audio seconds transcribed per wall-clock second "
-                     "(x real-time, aggregate across all legs). RTF is per call.\n")
-        if concurrency_results:
-            rows = []
-            for cr in concurrency_results:
-                cfg   = getattr(cr, "config_id", "?")
-                legs  = str(getattr(cr, "n_legs", 0))
-                ls    = getattr(cr, "latency_stats", {})
-                rs    = getattr(cr, "rtf_stats", {})
-                thru  = _fmt(getattr(cr, "throughput_audio_hours_per_wall_hour", 0), 2)
-                wall  = _fmt(getattr(cr, "wall_elapsed_s", 0.0), 1) + "s"
-                ncall = str(getattr(cr, "n_calls", 0))
-                errs  = str(getattr(cr, "error_count", 0))
-                sm    = getattr(cr, "system_metrics", {})
-                prss  = _fmt(sm.get("peak_rss_mb", 0), 0)
-                rows.append([
-                    cfg, legs, ncall, wall,
-                    _fmt(ls.get("p50",  0), 3)+"s",
-                    _fmt(ls.get("p95",  0), 3)+"s",
-                    _fmt(ls.get("p99",  0), 3)+"s",
-                    _fmt(rs.get("mean", 0), 3),
-                    thru+"x",
-                    errs,
-                    prss+" MB",
-                ])
-            lines.append(_table(
-                ["Config", "Legs", "Calls", "Wall", "Lat P50", "Lat P95", "Lat P99",
-                 "RTF Mean", "Throughput", "Errors", "Peak RSS"],
-                rows
-            ) + "\n")
-        else:
+        if not concurrency_results:
             lines.append("_(no concurrency results)_\n")
+        if stream_results:
+            lines.extend(self._streaming_concurrency_section(stream_results))
+        if batch_results:
+            lines.extend(self._batch_concurrency_section(batch_results))
 
         # ── Failures ──────────────────────────────────────────────────────
         failures = all_results.get("failures", [])

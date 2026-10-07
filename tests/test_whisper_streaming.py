@@ -327,6 +327,56 @@ def test_websocket_streams_whisper_tiny(monkeypatch):
 
 
 @pytest.mark.skipif(not os.path.exists(TINY), reason="whisper tiny int8 model not downloaded")
+def test_websocket_normalises_declared_8khz_input(monkeypatch):
+    """A client that declares 8 kHz gets its audio resampled, not transcribed at the wrong speed.
+
+    Same file and same assertions as the 16 kHz test above, but streamed at half
+    the rate so the server-side normalisation path does the work the browser
+    normally does.
+    """
+    import librosa
+    import soundfile as sf
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("RT_MASR_MODEL", "whisper_int8_tiny")
+    import main
+
+    wav, sr = sf.read("test_audio/en/librispeech_2_1089_2.wav", dtype="float32")
+    assert sr == SR
+    wav_8k = librosa.resample(wav, orig_sr=SR, target_sr=8000).astype(np.float32)
+
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/ws/call-stream") as ws:
+            assert ws.receive_json()["type"] == "connected"
+            ws.send_json({
+                "type": "start_call",
+                "language": "en",
+                "audio": {"sample_rate": 8000, "channels": 1, "encoding": "pcm_s16le"},
+            })
+            ready = ws.receive_json()
+            assert ready["type"] == "call_ready"
+            assert ready["audio_format"]["resample"] is True
+
+            for i in range(0, len(wav_8k), WORD_N // 2):      # same wall-clock pacing
+                ws.send_bytes(to_pcm(wav_8k[i:i + WORD_N // 2]))
+            ws.send_json({"type": "end_call"})
+
+            final, acks = None, []
+            while final is None:
+                msg = ws.receive_json()
+                if msg["type"] == "chunk_ack":
+                    acks.append(msg)
+                elif msg["type"] == "call_ended":
+                    final = msg
+
+    # intelligible text proves the audio was resampled, not replayed at 2x speed
+    text = final["final_text"].lower()
+    assert "yellow" in text and "lamps" in text
+    # each packet is 0.5 s of real time at 8 kHz; buffered_seconds must say so
+    assert acks[0]["buffered_seconds"] == pytest.approx(WORD_S, abs=0.01)
+
+
+@pytest.mark.skipif(not os.path.exists(TINY), reason="whisper tiny int8 model not downloaded")
 def test_whisper_timing_reports_nonzero_prefill_and_consistent_stages():
     import soundfile as sf
     from src.engines.whisper_engine import WhisperOnnxEngine

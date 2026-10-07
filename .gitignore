@@ -221,5 +221,7 @@ __marimo__/
 *.pdf
 benchmark/results/*.json
 benchmark/results/*.md
+loadtest/results/*.json
+loadtest/results/*.md
 *.jpg
 *.txt

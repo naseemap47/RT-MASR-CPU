@@ -14,7 +14,7 @@ contract, and configuration resolution. Historical design changes are in
 ```mermaid
 flowchart LR
     subgraph Browser["Browser — static/ (index.html, app.js, style.css)"]
-        WAV["WAV file / sample picker"] --> DEC["AudioContext.decodeAudioData<br/>resample → 16 kHz, channel 0"]
+        WAV["WAV file / sample picker"] --> DEC["AudioContext.decodeAudioData<br/>resample → 16 kHz, downmix → mono"]
         DEC --> PACE["Pacer: setInterval 500 ms<br/>8000 samples → Int16 PCM"]
         UI["Transcript + metric cards<br/>stream-state pill"]
     end
@@ -54,7 +54,7 @@ flowchart LR
 |---|---|---|
 | UI / call-leg simulator | `static/index.html`, `static/app.js`, `static/style.css` | Load a WAV, decode/resample to 16 kHz mono, stream it at real-time pace, render the evolving transcript and telemetry |
 | API / session layer | `main.py` | Serve the UI, `/api/*` endpoints and the `/ws/call-stream` WebSocket; one `LiveCallSession` per connection; schedule inference off the event loop |
-| Session state | `src/engines/live_call_session.py` | PCM → float32 buffering, RMS energy gate, VAD boundary detection, committed transcript, timestamp anchors and metric assembly |
+| Session state | `src/engines/live_call_session.py` | Input-format validation and normalisation to the 16 kHz mono baseline, PCM → float32 buffering, RMS energy gate, VAD boundary detection, committed transcript, timestamp anchors and metric assembly |
 | ASR engines | `src/engines/*.py` | Model loading and inference; all expose `transcribe()` and `transcribe_stream()` with the same contract |
 | Shared audio helpers | `src/utils/audio_utils.py` | Audio loading, 128-bin mel spectrogram for Qwen3, silence split points for long files |
 | Vendored Whisper decoding | `src/whisper/` | Tokenizer, beam search / temperature fallback and segment logic (from `whisper-onnx-cpu`), driven by ONNX sessions |
@@ -116,13 +116,54 @@ sequenceDiagram
 
 ### 2.1 Audio format and normalisation
 
-- **Baseline format:** 16 kHz, mono, Linear PCM.
-- **Normalisation happens in the browser.** `AudioContext({sampleRate: 16000})`
-  plus `decodeAudioData` decodes any WAV the browser understands (including the
-  8 kHz Mandarin OSR files) and resamples it to 16 kHz. Only channel 0 is sent.
-  Samples are clipped to [-1, 1] and converted to Int16.
-- **Server side**, `process_pcm_bytes()` converts Int16 → float32 / 32768 and
-  appends to `audio_buffer`.
+**Baseline format: 16 kHz, mono, Linear PCM, little-endian Int16.** This is what
+every engine's feature extractor expects (128-bin log-mel for Qwen3, 80-bin for
+Whisper, both at `sr=16000`), so it is also the format on the WebSocket wire and
+the format all benchmark numbers are measured in. `test_audio/en/librispeech_*`
+are already native 16 kHz mono.
+
+Other PCM formats *are* accepted, and they are normalised in two places.
+
+**1. In the browser, before anything is sent** (`static/app.js`):
+
+| Input property | Conversion | Where |
+|---|---|---|
+| Any sample rate (8 kHz OSR Mandarin, 44.1 kHz `harvard.wav`, 48 kHz `ind_*`) | Resampled to 16 kHz by the Web Audio resampler | `new AudioContext({sampleRate: 16000})` + `decodeAudioData` |
+| Any container the browser can decode | Decoded to float32 PCM | `decodeAudioData` (failure is reported in the UI, not swallowed) |
+| 2+ channels | **Averaged** across all channels | `downmixToMono()` |
+| float32 [-1, 1] | Clipped, scaled by `0x7FFF`, packed little-endian | `sendNextChunk()` |
+
+Averaging rather than keeping channel 0 matters because dual-channel call
+recordings often put one leg per channel — taking channel 0 would drop a speaker.
+
+**2. On the server, for clients that are not the browser** (`LiveCallSession`).
+The load-test harness and any real media gateway bypass the browser entirely, so
+the format is part of the protocol instead of an assumption: `start_call` may
+carry an `audio` object, and `set_input_format()` validates it.
+
+| Declared | Server behaviour |
+|---|---|
+| absent | Baseline assumed (16 kHz / 1 ch / `pcm_s16le`) — the browser's case |
+| `sample_rate` ≠ 16000 (4 k–192 k) | Resampled in `_resample_to_baseline()`, phase carried across packets so chunk seams are glitch-free |
+| `channels` > 1 (≤ 8) | Interleaved frames de-interleaved and averaged |
+| `encoding` ≠ `pcm_s16le` | **Rejected**: `{"type":"error","error":"unsupported_audio_format"}` and the leg closes |
+| out-of-range rate / channel count | Rejected the same way |
+
+The accepted format is echoed back in `call_ready.audio_format`, including which
+normalisation steps it triggered.
+
+Two deliberate limitations: companded telephony codecs (G.711 µ-law/A-law) are
+rejected rather than guessed at, so a gateway must expand them to Linear PCM
+first; and the server-side resampler is linear interpolation — cheap and
+dependency-free, but a weaker anti-alias filter than the browser's. It is sized
+for the realistic 8 kHz telephony case, which carries nothing above 4 kHz for
+imaging to fold back. Clients that can send 16 kHz should.
+
+After normalisation `process_pcm_bytes()` converts Int16 → float32 / 32768 and
+appends to `audio_buffer`, so nothing downstream ever sees a non-baseline sample.
+A packet that ends mid-frame is not an error: the trailing bytes are held in
+`_byte_carry` and prefixed to the next packet, so a misaligned client cannot
+abort the call leg with a `ValueError`.
 
 ### 2.2 Chunking, pacing and triggering
 
@@ -214,8 +255,8 @@ immediately on the client side.
 
 | Message | Shape |
 |---|---|
-| Start | `{"type": "start_call", "language": "en" \| "zh" \| "id" \| ""}` (empty = auto-detect) |
-| Audio | Binary frame of little-endian Int16 PCM, 16 kHz mono |
+| Start | `{"type": "start_call", "language": "en" \| "zh" \| "id" \| "", "audio": {"sample_rate": 16000, "channels": 1, "encoding": "pcm_s16le"}}` — empty language = auto-detect; `audio` is optional and defaults to the baseline (§2.1) |
+| Audio | Binary frame of little-endian Int16 PCM, in the declared format |
 | End | `{"type": "end_call"}` |
 
 **Server → client**
@@ -223,10 +264,11 @@ immediately on the client side.
 | Message | Fields |
 |---|---|
 | `connected` | `model_ready`, `stream_mode`, `message` |
-| `call_ready` | `stream_mode`, `message` |
+| `call_ready` | `stream_mode`, `audio_format` (accepted input format + the normalisation it triggers), `message` |
 | `chunk_ack` | `buffered_seconds`, `chunks_received`, `total_bytes` |
 | `transcript_delta` | `full_text`, `committed_text`, `tentative_text`, `metrics` (+ `stream_mode`, and `window_s` / `window_start_s` / `language` in sliding-window mode) |
 | `call_ended` | `final_text`, `metrics` (+ `total_call_time_s`) |
+| `error` | `error` (e.g. `unsupported_audio_format`), `message`; the leg closes afterwards |
 
 ---
 

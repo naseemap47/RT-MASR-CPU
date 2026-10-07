@@ -15,7 +15,7 @@ flowchart TD
     LOOP --> L1["1 · Load timer<br/>cold-start time + RSS delta"]
     L1 --> L2["2 · Latency runner<br/>warm-up + N runs per file → P50/P95/P99, RTF, CPU/RSS"]
     L2 --> L3["3 · Accuracy runner<br/>WER (en, id) / CER (zh) vs references.yaml"]
-    L3 --> L4["4 · Concurrency runner<br/>1/2/4 legs, shared engine, ThreadPoolExecutor"]
+    L3 --> L4["4 · Concurrency runner<br/>1/2/4 live legs streamed at real-time pace, shared engine"]
     L4 --> FREE["release_memory()<br/>before next config"]
     FREE --> LOOP
     LOOP -->|done| REP["Reporters"]
@@ -36,9 +36,13 @@ config is recorded under `failures` and the run continues with the next config;
 | `configs[]` | `id`, `display_name`, `backend` (`onnx` / `transformers` / `whisper`), `model_config` (per-model YAML), optional `enabled` (default `true`) | 7 Qwen3 + 4 Whisper INT8 (`qwen3_onnx_fp32_1.7b` disabled) |
 | `runs` | Measured runs per audio file | 3 |
 | `warmup_runs` | Discarded runs per audio file | 1 |
-| `concurrency_legs` | Simultaneous legs to test | `[1, 2, 4]` |
-| `concurrency_rounds` | Calls per worker (total calls = legs × rounds) | 2 |
-| `concurrency_audio` | Fixed workload; call *i* uses file *i* mod len | `librispeech_0_1089_0.wav` |
+| `concurrency_legs` | Simultaneous legs to test (one leg = one independently streamed audio source) | `[1, 2, 4]` |
+| `concurrency_mode` | `stream` (live legs at real-time pace) or `batch` (offline request queue) | `stream` |
+| `concurrency_chunk_s` | Stream mode: seconds of audio per chunk | 0.5 |
+| `concurrency_stagger_s` | Stream mode: delay between leg start times (0 = all start together, worst case) | 0 |
+| `concurrency_lag_threshold_s` | Stream mode: a leg "kept up" if p95 staleness and end lag stay below this | 2.0 |
+| `concurrency_rounds` | Batch mode only: requests per worker (total requests = legs × rounds) | 2 |
+| `concurrency_audio` | Audio sources; leg *i* (batch: request *i*) uses file *i* mod len | 3 `librispeech_*` files |
 | `audio` | Latency/accuracy files grouped by `en` / `zh` / `id` | 3 + 2 + 2 files |
 | `references_file` | Reference transcripts | `benchmark/data/references.yaml` |
 | `output_dir` | Where reports are written | `benchmark/results` |
@@ -96,6 +100,7 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_i
 | `--models a,b` | Subset of config ids |
 | `--runs N` | Override `runs` |
 | `--legs 1,2,4,8` | Override `concurrency_legs` |
+| `--concurrency-mode stream\|batch` | Override `concurrency_mode` |
 | `--skip-accuracy` | Skip stage 3 |
 | `--skip-concurrency` | Skip stage 4 |
 | `--output-dir DIR` | Override `output_dir` |
@@ -132,14 +137,53 @@ in plain words in [section 5](#5-metrics-explained-in-plain-words).
   the current references hold one sentence, which is why CER is > 1 for those
   rows. Fix the references before quoting ZH/ID accuracy.
 
-### 4.4 Concurrency (`runners/concurrency_runner.py`)
-One shared, warmed-up engine; `legs` worker threads each perform `rounds`
-`transcribe()` calls on the fixed workload. Reports per-call latency
-percentiles, RTF, aggregate throughput in audio-hours per wall-hour (> 1 means
-faster than real time in aggregate), error count and peak RSS/CPU.
+### 4.4 Concurrency (`runners/streaming_concurrency_runner.py`, `runners/concurrency_runner.py`)
 
-This is an offline capacity test: calls are submitted as fast as workers are
-free, not paced at real time, and they do not go through the WebSocket path.
+**Definition: one leg = one independently streamed audio source** (one call).
+N legs means N sources streaming at the same time into one shared, warmed-up
+engine, as in the live server.
+
+**Stream mode (default).** Each leg is a thread that plays its audio file into
+the engine in `concurrency_chunk_s` chunks (0.5 s, like the browser) that arrive
+at real-time pace: 0.5 s of audio every 0.5 s of wall clock. The leg runs the
+same stream logic as `main.py`'s `/ws/call-stream` handler, minus the WebSocket:
+
+| Backend | Stream logic | Source |
+|---|---|---|
+| Whisper | sliding window + LocalAgreement; backlog is skipped when a pass is slow | `WhisperSlidingWindowStreamer`, `streaming:` block of the model YAML |
+| Qwen3 (ONNX / Transformers) | energy-gated, VAD-cut utterances; late chunks queue up | `LiveCallSession` + the trigger rules of `_handle_audio_vad` |
+
+Leg *i* streams `concurrency_audio[i mod len]`, so with several files the legs
+are different sources. Audio is decoded before the clock starts. Each stream
+lasts as long as its audio (about 3–10 s for the shipped files), so a level
+takes roughly as long as the longest leg.
+
+The question answered is **"do all N legs keep up with live speech?"**:
+
+- **Pass latency / pass RTF**: wall time of each inference pass, and that time ÷
+  the audio the pass covered.
+- **Staleness**: pass finish time − arrival time of the newest audio in it.
+  This is how far the transcript trails the speaker, queueing included. When a
+  pass is slower than the audio it covers, staleness grows.
+- **First text**: stream start → first recognised text.
+- **End lag**: end of audio → final transcript committed.
+- **Kept up**: p95 staleness and end lag both ≤ `concurrency_lag_threshold_s`,
+  no errors, at least one pass. The report also gives the **highest tested leg
+  count at which every leg kept up** per config.
+- **Text**: legs with a non-empty final transcript. If this is below the leg
+  count the other numbers are suspect (e.g. the model produced no tokens).
+
+`concurrency_stagger_s: 0` starts every call at the same instant, which is the
+worst case (all legs hit the engine in the same hop). Real calls are not
+aligned; set a stagger (e.g. 0.7) for a more typical load.
+
+**Batch mode (`--concurrency-mode batch`).** The previous offline capacity test:
+`legs` worker threads each perform `rounds` back-to-back `transcribe()` calls on
+whole files (so *requests* = legs × rounds, e.g. 1 leg = 2 requests). Nothing is
+paced at real time, so a "leg" here is a worker, not a live call. It reports
+per-request latency percentiles, RTF, aggregate throughput in audio-hours per
+wall-hour (> 1 means faster than real time in aggregate), error count and peak
+RSS/CPU. Use it for raw throughput, not for live-call capacity.
 
 ---
 
@@ -158,7 +202,7 @@ You do not need an ML background to read the reports. Each metric below says
 | Is it correct? | **WER** (English, Indonesian) / **CER** (Chinese) | close to 0 % |
 | How long until it is ready after start-up? | **Load time** | a few seconds |
 | How much memory does it need? | **RSS / Peak RSS** | fits in your RAM with room to spare |
-| How many calls can one machine handle? | **Throughput** and the **Concurrency** table | throughput above the number of calls you need |
+| How many live calls can one machine handle? | **Kept up** and *Concurrent live legs supported* (Concurrency) | all legs kept up at the call count you need |
 
 ### 5.2 Speed metrics
 
@@ -286,30 +330,50 @@ language is a quick explanation for a very high error rate.
 
 ### 5.6 Concurrency metrics (many calls at once)
 
-Several worker threads ("legs") share **one** loaded model and transcribe the same
-audio as fast as they can, to see how the system copes under load. It is an
-offline capacity test, not a live-call simulation.
+**One leg = one independently streamed audio source (one live call).** In the
+default stream mode, each leg feeds its audio to **one** shared model at
+real-time pace, and the report shows whether every leg still keeps up.
 
 | Metric | Plain meaning |
 |---|---|
-| **Legs** | number of simultaneous callers |
-| **Calls** | total requests made at that level (legs × rounds) |
+| **Legs** | number of calls streaming at the same time |
+| **Kept up** | legs that stayed live, as `kept/total` (see below) |
+| **Pass P50 / P95** | how long one inference pass took while sharing the machine |
+| **Pass RTF P95** | pass time ÷ audio covered by that pass; above 1.0 the pass is slower than the audio |
+| **Stale P50 / P95 / Max** | how far the transcript trails the speaker, in seconds (includes waiting in line) |
+| **First Text** | seconds from call start until the first words appear |
+| **End Lag** | seconds from the end of the audio until the final transcript is done |
+| **Text** | legs that produced a non-empty transcript (should equal Legs) |
+| **Errors** | passes that raised an exception (should be 0) |
+| **CPU Mean / Peak RSS** | machine-wide CPU and highest RAM used at that level |
+
+**Kept up, simply:** a leg keeps up when the text appears close behind the
+speech: its p95 staleness and its end lag both stay under
+`concurrency_lag_threshold_s` (2 s by default). If the engine needs 3 s for every
+2 s of audio, text falls further behind each second and the leg does not keep up.
+The *Concurrent live legs supported* table shows, per config, the largest tested
+leg count at which every leg kept up.
+
+**What good scaling looks like:** going from 1 to 2 to 4 legs, staleness and end
+lag should stay low and *Kept up* should stay `n/n`. When staleness grows with
+the number of legs, the CPU is saturated and extra callers just wait in line.
+
+**Batch mode metrics.** With `--concurrency-mode batch`, legs are worker threads
+making back-to-back `transcribe()` requests with no pacing:
+
+| Metric | Plain meaning |
+|---|---|
+| **Legs (workers)** | simultaneous worker threads |
+| **Requests** | total `transcribe()` calls at that level (legs × rounds) |
 | **Wall** | total real time to finish all of them |
-| **Lat P50 / P95 / P99** | per-call latency while sharing the machine (see 5.2) |
-| **RTF Mean** | average per-call RTF. It rises as legs are added because calls slow each other down |
-| **Throughput** | audio seconds transcribed per second of real time, across all legs together |
-| **Errors** | calls that raised an exception (should be 0) |
-| **Peak RSS** | highest RAM used at that level |
+| **Lat P50 / P95 / P99** | per-request latency while sharing the machine (see 5.2) |
+| **RTF Mean** | average per-request RTF; it rises as workers are added |
+| **Throughput** | audio seconds transcribed per second of real time, across all workers |
 
-**Throughput, simply:** if the machine transcribed 60 s of audio while 20 s of
-real time passed, throughput is **3.0×**. In the raw JSON this is called
-`audio-hours per wall-hour` — the same number. A throughput of 3.0× means the
-machine can in principle keep roughly three live calls going at once.
-
-**What good scaling looks like:** going from 1 to 2 to 4 legs, throughput should
-rise or stay level while latency stays reasonable. If latency grows as fast as
-the number of legs and throughput stays flat, the CPU is already saturated and
-extra callers just wait in line.
+Throughput example: if the machine transcribed 60 s of audio while 20 s of real
+time passed, throughput is **3.0×** (raw JSON: `audio-hours per wall-hour`). It
+shows raw capacity only. It does not prove that live calls keep up, because
+requests are not paced at real time.
 
 ### 5.7 Hardware fingerprint
 
@@ -338,8 +402,11 @@ raw JSON (`timing_detail`) and in the live UI cards:
 - RTF per run = 0.21, 0.20, 0.26 → the model is about 4–5× faster than live
   speech, so it can keep up in a live call.
 - If the reference has 20 words and the model made 1 mistake, WER = 1 ÷ 20 = **5 %**.
-- With 2 legs, if 4 calls finish in 5 s of wall time: audio processed = 40 s,
-  so throughput = 40 ÷ 5 = **8×**.
+- Batch mode, 2 workers: if 4 requests finish in 5 s of wall time: audio
+  processed = 40 s, so throughput = 40 ÷ 5 = **8×**.
+- Stream mode, 4 legs each streaming a 10 s clip: if the slowest pass finishes
+  1.2 s after the audio it covers arrived and the final transcript is ready 0.8 s
+  after the call ends, all four legs are under the 2 s threshold, so 4 legs kept up.
 
 (These numbers are made up to show the arithmetic; real results are in your
 generated `*_summary.md`.)
@@ -351,7 +418,7 @@ generated `*_summary.md`.)
 | File | Contents |
 |---|---|
 | `<UTC>_raw.json` | Every measurement, including raw per-run latencies, hardware fingerprint and run parameters |
-| `<UTC>_summary.md` | Hardware/software table, load, latency/RTF, CPU/memory, accuracy and concurrency tables |
+| `<UTC>_summary.md` | Hardware/software table, load, latency/RTF, CPU/memory, accuracy and concurrency tables (including *Concurrent live legs supported* in stream mode) |
 
 Hardware fingerprint (`reporters/hardware_info.py`): CPU model, physical/logical
 cores, RAM, OS, Python and key library versions.
@@ -364,7 +431,8 @@ cores, RAM, OS, Python and key library versions.
 uv run pytest benchmark/tests -v
 ```
 
-Unit tests cover statistics, WER/CER, system sampling, each runner, the engine
+Unit tests cover statistics, WER/CER, system sampling, each runner (including the
+streaming concurrency runner with fake engines and sped-up playback), the engine
 loader and both reporters. They use fake engines and do not need model weights,
 except one Whisper loader test that is skipped when
 `models/whisper_int8/tiny_*` is absent.

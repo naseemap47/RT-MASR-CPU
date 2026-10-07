@@ -18,6 +18,8 @@
 | 7 | Config-driven model registry and multiple backends | 2026-10-04 |
 | 8 | Offline benchmark pipeline | 2026-10-04 |
 | 9 | Whisper ONNX engine (benchmark comparison) | 2026-10-05 |
+| 10 | Load test and capacity sizing | 2026-10-06 |
+| 11 | Load test retargeted to edge CPU (no cloud SKU math) | 2026-10-07 |
 
 ---
 
@@ -549,6 +551,12 @@ Notable decisions:
 - Every concurrency level uses the same fixed audio workload so levels are
   comparable.
 - A failing config is recorded in `failures` instead of aborting the run.
+- Concurrency means live legs: one leg = one independently streamed audio source.
+  `concurrency_mode: stream` (default) plays each leg at real-time pace using the
+  server's own stream logic (Whisper sliding window / Qwen3 VAD utterances) and
+  reports staleness, end lag and how many legs keep up. The earlier offline
+  request-queue test remains as `--concurrency-mode batch`; there a "leg" is a
+  worker thread and "calls" are `legs x rounds` requests (now labelled Requests).
 
 ---
 
@@ -579,3 +587,53 @@ models/runtimes.
 Whisper is wired into the benchmark only. `main.py` `_build_engine()` still
 accepts just `onnx` and `transformers`, so a `whisper_*` `default_model` is not
 servable by the live UI yet.
+
+---
+
+## 10. Load Test and Capacity Sizing
+
+### Problem
+
+The benchmark's concurrency scaling runs legs inside one process on one thread pool; it does not show where a node saturates or how
+to size a fleet for tens to thousands of simultaneous calls.
+
+### Changes
+
+- New `loadtest/` package: `WorkerPool` (P pinned worker processes, each one engine, real-time call legs with the live server's stream logic),
+  `run_ramp` (ladder -> bisect -> confirm saturation search with memory guards), `TreeSampler` (pinned-CPU, RSS and free-RAM sampling),
+  reporters, and `run_loadtest.py`.
+- `StreamingConcurrencyRunner` gained an overload guard (`abort_lag_s`), `prepare()` / `run_level()` and global leg offsets so a level can be
+  split across processes.
+- `loadtest/sizing/` + `run_sizing.py`: turns measured saturation points into a sizing guide (headroom, serving overhead, spares, shared-model
+  memory, scale-up fit, process strategy), tagging every number MEASURED / DERIVED / ASSUMED / EXTRAPOLATED.
+- Docs: `docs/loadtest/loadtest.md` (how it works) and `docs/loadtest/sizing_guide.md` (results for 50/60/100/200/500/1,000 legs).
+
+### Result on the development laptop (8C/16T)
+
+Saturation at 1-3 legs per box; more cores in one process did not help, two pinned processes helped Whisper, four hurt. The sizing for
+50+ legs is therefore extrapolated and stated as such.
+
+---
+
+## 11. Load Test Retargeted to Edge CPU
+
+### Problem
+
+The first load-test sizing treated pinned CPU layouts as stand-ins for cloud VMs (sibling-pair "vCPUs", 2 GB/vCPU instance
+RAM, predicted larger chips, fleet vCPU totals). This project deploys on edge CPUs.
+
+### Changes
+
+- Topology comments and CLI (`--cpus`) describe pinning logical CPUs of **this** machine, not modeling an instance type.
+- Sizing RAM is the GB the box needs (ceil of measured weights + per-leg RSS + OS), not a cloud SKU.
+- Sizing tables report **edge boxes**, **CPU threads / box** and **RAM / box**. Fleet "Estimated vCPU" and predicted
+  32/64/128-thread capacities were removed.
+- Docs (`docs/loadtest/*`, `docs/deployment.md` section 9, README, project guide) match that edge framing.
+
+The 4/8/16-thread × process **scenario matrix** was later dropped: each model × profile is ramped once on the whole
+machine. `core_sweep` / `process_sweep` were removed from `loadtest_config.yaml`.
+
+The generated sizing guide now has one section 3 subsection per model and profile (latency vs load); the thread-count and
+process-strategy comparisons only appear when a result file holds several layouts. The curated guide, README, deployment
+and project guide were refreshed from the whole-machine run `20261007T170448Z`: Whisper tiny 3 conversational / 2 dense legs,
+Qwen3-0.6B 1 / 1 (one leg more than the October 6 run for Whisper and Qwen dense, within run-to-run noise).

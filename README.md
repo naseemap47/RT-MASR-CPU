@@ -17,6 +17,9 @@ Whisper** (selectable), plus a benchmark harness that compares both families.
   Runtime (INT8 / FP16 / FP32).
 - **Benchmark:** cold-start load, latency/RTF percentiles, WER/CER, and
   concurrency scaling, written to JSON + Markdown reports.
+- **Load test & capacity sizing:** simulates many real-time call legs on pinned
+  worker processes, finds the saturation point and builds a CPU sizing guide
+  for 50-1,000 legs (`loadtest/`, see `docs/loadtest/`).
 
 ---
 
@@ -44,6 +47,7 @@ flowchart LR
     end
 
     BM["benchmark/run_benchmark.py"]
+    LT["loadtest/run_loadtest.py"]
     CFG["config/ (model registry)"]
 
     C -- "PCM frames + start/end_call" --> W
@@ -54,9 +58,12 @@ flowchart LR
     W -- "chunk_ack · transcript_delta · call_ended" --> T
     CFG --> Server
     CFG --> BM
+    CFG --> LT
     BM --> E1
     BM --> E2
     BM --> E3
+    LT --> E1
+    LT --> E3
 ```
 
 ### Call-leg flow
@@ -123,10 +130,11 @@ config/
   models/models.yaml        Model registry
   models/*.yaml             Per-model settings (download, engine, inference)
 benchmark/                  Offline benchmark pipeline (runners, metrics, reporters, tests)
+loadtest/                   Load test (call-leg simulator, saturation search) + sizing model
 tests/                      Server / session / streaming tests
 models/                     Downloaded weights (git-ignored)
 test_audio/{en,cn,id}/      Test WAV files (git-ignored)
-docs/                       Architecture, changelog, benchmark docs
+docs/                       Architecture, changelog, benchmark and load-test docs
 ```
 
 ---
@@ -279,8 +287,15 @@ test_audio/
 
 These are the files `benchmark/configs/bench_config.yaml` and
 `benchmark/data/references.yaml` expect (English from LibriSpeech speaker 1089,
-Mandarin from the Open Speech Repository Chinese set). Any Linear PCM WAV works
-in the UI; the browser resamples it to 16 kHz mono before streaming.
+Mandarin from the Open Speech Repository Chinese set).
+
+The baseline format everywhere — wire protocol, engines and benchmark numbers —
+is **16 kHz mono Linear PCM (little-endian Int16)**. Any Linear PCM WAV still
+works in the UI: the browser resamples to 16 kHz and averages the channels to
+mono before streaming, and a non-browser client can declare a different rate or
+channel count in `start_call` for the server to normalise instead. See
+[§2.1 Audio format and normalisation](docs/arch/architecture.md#21-audio-format-and-normalisation)
+for the full conversion table and its limitations.
 
 ---
 
@@ -342,6 +357,7 @@ The model loads at startup (a few seconds for ONNX). `GET /api/health` reports
 
 ```bash
 # Full run: every config in bench_config.yaml, 3 runs, concurrency legs 1/2/4
+# (one leg = one live audio stream played at real-time pace)
 uv run python benchmark/run_benchmark.py
 
 # Fast run: ONNX only, no accuracy, 1 run
@@ -376,8 +392,16 @@ large for some machines):
 A disabled config can still be run once by naming it:
 `uv run python benchmark/run_benchmark.py --models qwen3_onnx_fp32_1.7b --runs 1`.
 
+**Concurrency.** One leg = one independently streamed audio source. The default
+`concurrency_mode: stream` plays N audio sources into one shared engine at
+real-time pace (the live server's stream logic) and reports whether all N keep
+up (staleness, end lag, max legs kept up). `--concurrency-mode batch` runs the
+older offline test where each "leg" is a worker making back-to-back
+`transcribe()` requests.
+
 Sample results from `benchmark/results/20261004T095157Z_summary.md` (8 physical
-/ 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s):
+/ 16 logical cores, 14.9 GB RAM, `librispeech_0_1089_0.wav`, 10.4 s; the
+throughput column is from the older batch-mode concurrency test):
 
 | Config | Load | Latency P50 | RTF | WER | Throughput @ 4 legs |
 |---|---|---|---|---|---|
@@ -389,11 +413,59 @@ Sample results from `benchmark/results/20261004T095157Z_summary.md` (8 physical
 
 ---
 
+## Run the load test and capacity sizing
+
+The load test answers *how many simultaneous live calls can one edge CPU carry, and how many identical boxes
+are needed for 50-1,000 legs?* It runs many independent real-time call legs (one leg = one audio source streamed at
+real-time pace through the live server's stream logic) on pinned worker processes, ramps the number of legs until the
+machine saturates, and writes the measured data. A separate step turns it into a sizing guide for more of the same
+edge boxes. It does not size cloud instance fleets.
+
+```bash
+# Show the runs (model x load profile on this whole machine)
+uv run python loadtest/run_loadtest.py --list
+
+# Full run (keep the machine otherwise idle)
+uv run python loadtest/run_loadtest.py
+
+# Narrower runs
+uv run python loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny
+uv run python loadtest/run_loadtest.py --levels 1,2 --duration 15        # smoke run
+
+# Build the sizing guide from one or more raw results (every assumption is a flag)
+uv run python loadtest/run_sizing.py --input loadtest/results/<dense>_loadtest_raw.json loadtest/results/<conv>_loadtest_raw.json
+uv run python loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --legs 50,100,1000
+```
+
+- **Models:** add an `id` under `models:` in `loadtest/configs/loadtest_config.yaml`. The id must already exist in
+  `benchmark/configs/bench_config.yaml` (that file maps id → backend and model YAML). `--models` only selects from that
+  roster.
+- **Profiles:** `dense` (about 85% speech, stress) and `conversational` (about 47% speech, planning case).
+- **Saturation point:** the highest leg count where every leg keeps p95 staleness and end-of-call lag within
+  `slo.lag_threshold_s` (2 s by default), found by ramp, bisect and confirm.
+- **Outputs:** `loadtest/results/<UTC>_loadtest_raw.json` and `_loadtest_summary.md` (measured), then
+  `<UTC>_sizing_guide.md` and `_sizing.json` (derived and extrapolated, each number tagged
+  MEASURED / DERIVED / ASSUMED / EXTRAPOLATED).
+- **Memory safety:** workers start one at a time against free RAM, and levels that would not fit are skipped
+  (reserve and floor in `loadtest/configs/loadtest_config.yaml`).
+
+Result on the development laptop (8 cores / 16 threads, whole machine, one process): one box saturates at only
+**1-3 legs** (Whisper tiny INT8: 3 conversational / 2 dense; Qwen3-0.6B INT8: 1 / 1). Extra legs need extra boxes.
+Every 50+ leg row is extrapolated and labelled with its confidence. For example, 100 conversational legs is about
+59 Whisper-tiny boxes (range 44-87, ~4 GB each) or 110 Qwen3 boxes (~7 GB each), including 10% spares. Repeat runs
+differ by about one leg. See
+[`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) for the full tables (50/60/100/200/500/1,000 legs),
+assumptions and limitations, and [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) for how the pipeline works.
+Re-run it on the target edge CPU before buying hardware.
+
+---
+
 ## Tests
 
 ```bash
 uv run pytest tests/test_live_call_session.py   # session buffer / gate / VAD, no models needed
 uv run pytest benchmark/tests                   # benchmark pipeline, uses fake engines
+uv run pytest loadtest/tests                    # load-test core and sizing model, no models needed
 uv run pytest                                   # all of tests/ (needs models + test_audio)
 ```
 
@@ -415,6 +487,8 @@ uv run pytest                                   # all of tests/ (needs models + 
 - The energy gate is a fixed RMS threshold calibrated on the test audio, not a
   trained VAD; there is no queue limit or drop policy for frames that arrive
   during inference.
+- Load-test sizing for 50+ legs is extrapolated from a single laptop CPU where a node saturates at 1-3
+  legs, so it carries Low / Very low confidence; re-measure on the target hardware.
 - Mandarin and Indonesian references are partly unverified drafts, so ZH/ID
   accuracy numbers are not yet meaningful.
 
@@ -427,3 +501,6 @@ uv run pytest                                   # all of tests/ (needs models + 
 | [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
+| [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |
+| [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | Edge-CPU sizing for 50-1,000 concurrent legs (identical boxes; measured vs extrapolated) |
+| [`docs/deployment.md`](docs/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |

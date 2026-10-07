@@ -57,7 +57,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from core.model_check import (  # noqa: E402
-    download_command, missing_files, registry_table, unknown_name_message,
+    Panel, download_command, missing_files, registry_table, report, unknown_name_panel,
 )
 
 RESULT_TAG = "@@RESULT@@ "
@@ -387,10 +387,21 @@ def recommend(reports: list[ModelReport]) -> None:
     logger.info(" sliding window and concurrent calls share the CPU, so keep headroom (RTF <~ 0.3).")
 
 
+def report_not_downloaded(reports: list[ModelReport]) -> None:
+    missing = [r for r in reports if r.status == "NOT DOWNLOADED"]
+    if not missing:
+        return
+    p = Panel(f"{len(missing)} model(s) not downloaded", "warning")
+    p.note("Download only the ones you need:").blank()
+    for r in missing:
+        p.heading(r.name).command(download_command(r.name))
+    report(logger, p)
+
+
 def explain_skips(reports: list[ModelReport]) -> None:
     for r in reports:
         if r.status == "NOT DOWNLOADED":
-            r.note = f"missing {', '.join(r.missing[:3])}. Download: {download_command(r.name)}"
+            r.note = f"missing {', '.join(r.missing[:3])} (download command below)"
         elif r.status == "MISSING DEPS":
             r.note = f"python package(s) not installed: {', '.join(r.missing_deps)}"
 
@@ -435,9 +446,10 @@ def _main(args: argparse.Namespace) -> int:
         wanted = [m.strip() for m in args.models.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in {e["name"] for e in registry}]
         if unknown:
-            logger.error("\n%s\n", unknown_name_message(
+            report(logger, unknown_name_panel(
                 "model", unknown, [e["name"] for e in registry], registry_table(registry),
-                where="--models"))
+                where="--models",
+                hints=["$ uv run python src/utils/check_models.py --models <name>[,<name>...]"]))
             return 1
         registry = [e for e in registry if e["name"] in wanted]
 
@@ -478,6 +490,7 @@ def _main(args: argparse.Namespace) -> int:
 
     explain_skips(reports)
     print_table(reports)
+    report_not_downloaded(reports)
     if not args.no_run:
         recommend(reports)
     else:

@@ -39,7 +39,7 @@ from benchmark.runners.latency_runner import LatencyRunner
 from benchmark.runners.load_timer import measure_load_with_engine, release_memory
 from benchmark.runners.streaming_concurrency_runner import StreamingConcurrencyRunner
 from src.core.model_check import (
-    bench_entries_not_downloaded, bench_id_hint, bench_table, unknown_name_message,
+    bench_entries_not_downloaded, bench_id_hints, bench_table, report, unknown_name_panel,
 )
 from src.core.runlog import start_run
 
@@ -235,11 +235,11 @@ def _run(args: argparse.Namespace, run) -> None:
         known = {c["id"] for c in all_configs}
         unknown = [m for m in wanted if m not in known]
         if unknown:
-            hint = bench_id_hint(unknown, all_configs)
-            hint = (hint + "\n" if hint else "") + (
-                "Benchmark ids come from bench_config.yaml; pass them as --models <id>[,<id>...]")
-            logger.error("\n%s\n", unknown_name_message(
-                "benchmark id", unknown, known, bench_table(all_configs), where="--models", hint=hint))
+            report(logger, unknown_name_panel(
+                "benchmark id", unknown, known, bench_table(all_configs), where="--models",
+                hints=[*bench_id_hints(unknown, all_configs), "",
+                       "Benchmark ids come from bench_config.yaml (not registry names):",
+                       "$ uv run python benchmark/run_benchmark.py --models <id>[,<id>...]"]))
             sys.exit(1)
         all_configs = [c for c in all_configs if c["id"] in set(wanted)]
     else:
@@ -255,13 +255,15 @@ def _run(args: argparse.Namespace, run) -> None:
         sys.exit(1)
 
     not_downloaded = bench_entries_not_downloaded(all_configs)
-    for _, msg in not_downloaded:
-        logger.error("\n%s\n", msg)
+    for _, panel in not_downloaded:
+        if not args.models:
+            panel.level = "warning"
+            panel.blank().note("Skipped in this run; the other configs continue.")
+        report(logger, panel)
     if not_downloaded:
         if args.models:
             sys.exit(1)
         skip = {e["id"] for e, _ in not_downloaded}
-        logger.warning("Skipping config(s) that are not downloaded: %s", ", ".join(sorted(skip)))
         all_configs = [c for c in all_configs if c["id"] not in skip]
         if not all_configs:
             logger.error("No downloaded configs left to benchmark.")

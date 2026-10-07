@@ -41,6 +41,7 @@ import time
 import psutil
 import threading
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Union
@@ -49,8 +50,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from src.core.config import load_server_config
-from src.core.model_check import ModelSetupError, check_registry_model
-from src.core.runlog import begin_run
+from src.core.model_check import ModelSetupError, check_registry_model, report
+from src.core.runlog import begin_run, in_pytest
 from src.engines.live_call_session import LiveCallSession
 from src.engines.whisper_streaming import StreamingConfig, WhisperSlidingWindowStreamer
 
@@ -142,11 +143,18 @@ async def lifespan(app: FastAPI):
     try:
         _load_active_model()
     except ModelSetupError as exc:
-        logger.error("\n%s\n", exc)
+        report(logger, exc.panel)
+        logger.error("Server startup aborted: fix the model setup above and restart.")
         if _run_session is not None:
             _run_session.close(exit_code=1)
             _run_session = None
-        raise RuntimeError("ASR model setup failed (see the message above)") from None
+        if in_pytest():
+            raise RuntimeError("ASR model setup failed (see the message above)") from None
+        # Uvicorn would follow the panel with a lifespan traceback; nothing is serving yet.
+        logging.shutdown()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
     _model_ready = True
     logger.info("Engine ready: %s (stream mode: %s)", _active_model_name, _stream_mode())
     try:

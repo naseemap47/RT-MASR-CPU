@@ -248,11 +248,19 @@ The server, benchmark, load test, `check_models.py` and the downloader check the
 - **Wrong name / id:** the terminal shows "did you mean …" and a table of valid names with a `DOWNLOADED` yes/NO column.
 
 ```text
-Model 'whisper_fp16' is not downloaded.
-  missing in models/whisper_fp16: medium_encoder*.onnx, medium_decoder*.onnx
-Download it with:
-  uv run python src/utils/download_utils.py --model whisper_fp16
+╭─ ✖ Model not downloaded ─────────────────────────────────────────────╮
+│                                                                      │
+│ Model         whisper_fp16                                           │
+│ Location      models/whisper_fp16                                    │
+│ Missing       medium_encoder*.onnx, medium_decoder*.onnx             │
+│                                                                      │
+│ Download it with                                                     │
+│   $ uv run python src/utils/download_utils.py --model whisper_fp16   │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯
 ```
+
+The panel is boxed so it stands out from normal log lines: red for errors, yellow for skipped models, the command in cyan and the `DOWNLOADED` column in green / red. Color is used only on a terminal; `NO_COLOR=1` turns it off, `FORCE_COLOR=1` forces it, and `run.log` always gets plain text. The server stops after the panel without a traceback.
 
 Benchmark and load-test ids (`qwen3_onnx_int8_0.6b`) differ from registry names (`qwen3_onnx_0.6b_int8`). Their table shows both, and typing a registry name where an id is expected tells you which id to use. In a default run (no `--models`), models that are not downloaded are skipped with that message; when you name one explicitly with `--models`, the run stops instead.
 

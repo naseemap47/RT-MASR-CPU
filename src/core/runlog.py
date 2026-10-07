@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ from typing import Any, Iterator, Optional
 
 _LOG_FORMAT = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
 _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%SZ"
+_ANSI = re.compile(r"\033\[[0-9;]*m")
 
 _lock = threading.RLock()
 _active: Optional["RunSession"] = None
@@ -112,7 +114,7 @@ class _Tee:
         with self._lock:
             self._stream.write(text)
             try:
-                self._log.write(text)
+                self._log.write(_ANSI.sub("", text) if "\033" in text else text)
                 self._log.flush()
             except Exception:
                 pass

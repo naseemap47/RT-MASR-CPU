@@ -485,13 +485,12 @@ if __name__ == "__main__":
 
             entry = next((e for e in entries if e["name"] == args.model), None)
             if entry is None:
-                from core.model_check import registry_table, unknown_name_message
-                logger.error("\n%s\n", unknown_name_message(
+                from core.model_check import registry_table, report, unknown_name_panel
+                report(logger, unknown_name_panel(
                     "model", [args.model], [e["name"] for e in entries], registry_table(entries),
                     where="--model",
-                    hint=("Download one with:\n"
-                          "  uv run python src/utils/download_utils.py --model <name>\n"
-                          "or every registered model by omitting --model.")))
+                    hints=["Download one model (or omit --model to download all of them):",
+                           "$ uv run python src/utils/download_utils.py --model <name>"]))
                 raise SystemExit(1)
             model_cfg_path = cfg_dir / entry["config"]
             downloader.download_from_config(str(model_cfg_path), force=args.force, dry_run=args.dry_run)

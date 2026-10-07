@@ -502,7 +502,7 @@ only spares do. Whisper at 100 conversational legs moves from 51 boxes (80% head
 
 ## 11. Production architecture recommendation
 
-The full design is in [`../deployment.md`](../deployment.md). Summary:
+The full design is in [`../arch/deployment.md`](../arch/deployment.md). Summary:
 
 ```mermaid
 flowchart LR
@@ -527,7 +527,7 @@ flowchart LR
 | Admission control | Hard cap per box = measured saturation (Qwen: 1 on this CPU class); site occupancy ≤ ~65–70%; N+1 (≥ 10%) spares |
 | Health signals | Staleness P95 and pass RTF P95 over 30 s, queue depth, `active_legs / max_legs`. **Not CPU %** |
 | Overload policy | Stop admitting, then stretch draft passes (1 s → 2 s), then drop drafts and keep finals, then skip ahead, then shed newest legs to post-call batch transcription |
-| Code fixes before production | Duration-based (not message-count) trigger, Qwen skip-ahead, bounded per-leg queue, dedicated executor, Whisper hop counting on normalised samples, auth/TLS, health metrics (`docs/deployment.md` §3.5) |
+| Code fixes before production | Duration-based (not message-count) trigger, Qwen skip-ahead, bounded per-leg queue, dedicated executor, Whisper hop counting on normalised samples, auth/TLS, health metrics (`docs/arch/deployment.md` §3.5) |
 | Rollout gates | Telephony accuracy test, load test on the target edge CPU, 1–2 h soak, chaos tests (jitter, loss, stall, box kill), P95 staleness ≤ SLO at 65–70% occupancy |
 
 ---
@@ -616,4 +616,4 @@ python3 docs/report/make_figures.py                      # figures for this repo
 
 Related documents: [`../arch/architecture.md`](../arch/architecture.md) (POC internals), [`../how-streaming-works.md`](../how-streaming-works.md),
 [`../benchmark/benchmarking.md`](../benchmark/benchmarking.md), [`../loadtest/loadtest.md`](../loadtest/loadtest.md),
-[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) (sizing for 50-1,000 legs), [`../deployment.md`](../deployment.md) (production design).
+[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) (sizing for 50-1,000 legs), [`../arch/deployment.md`](../arch/deployment.md) (production design).

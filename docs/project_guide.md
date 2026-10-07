@@ -33,7 +33,7 @@ file as if it were a phone call and streams the audio to a Python server over a 
    many one node can carry, and turns that into a sizing guide for 50-1,000 legs.
 
 Plus documents: `docs/arch/architecture.md`, `docs/how-streaming-works.md`, `docs/benchmark/*`,
-`docs/loadtest/*`, `docs/deployment.md` (production design).
+`docs/loadtest/*`, `docs/arch/deployment.md` (production design).
 
 **Two model families**
 
@@ -766,7 +766,7 @@ guide shows a +/-1 leg range and why a conservative plan repeats the run and use
 **Q36. How would this accept real phone audio?**
 Through a media gateway that terminates RTP/WebRTC, decodes G.711/Opus, resamples, splits channels into one leg each and
 sends framed PCM with sequence numbers; the server already supports declared sample rate, channels and Int16 PCM.
-Details and the code gaps (message-count trigger, `_total_samples`, unbounded queue) are in `docs/deployment.md`.
+Details and the code gaps (message-count trigger, `_total_samples`, unbounded queue) are in `docs/arch/deployment.md`.
 
 **Q37. What happens when capacity is exceeded?**
 Every leg on the box degrades together. Qwen: lag grows without bound because there is no skip-ahead and the queue is
@@ -775,7 +775,7 @@ unbounded; Whisper: latency rises but backlog does not. Hence admission control 
 
 **Q38. How would you scale out?**
 More identical edge boxes (one ASR process per box), calls sticky to a box, N+1 spares, add a box on staleness and
-pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is in `docs/deployment.md` section 9.
+pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is in `docs/arch/deployment.md` section 9.
 
 ---
 
@@ -792,7 +792,7 @@ pass RTF (not CPU%, because spin-waiting makes it misleading). The box table is 
    (Whisper conversational was 2 legs in the October 6 run and 3 in `20261007T170448Z` and `20261007T202154Z`, which moves
    100 legs between 87 and 59 boxes), clean English speech only, 30 s calls.
 9. **Sizing for 50+ legs is extrapolated**, scale-out across identical edge boxes is assumed, batching not credited.
-10. **Production pieces are designs**, not code (`docs/deployment.md`).
+10. **Production pieces are designs**, not code (`docs/arch/deployment.md`).
 
 ---
 

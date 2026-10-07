@@ -3,7 +3,8 @@
 How the RT-MASR-CPU proof of concept would be taken from "a browser plays a WAV file" to "live telephony audio
 transcribed on a CPU fleet". It covers real audio ingestion, silence / end-of-utterance / long speech /
 interruptions / network jitter, the production headroom target and what happens when capacity is exceeded, and the
-horizontal scaling plan with node counts.
+horizontal scaling plan with node counts. A one-document overview of the POC and the recommended production
+architecture is [`system_architecture.md`](system_architecture.md).
 
 > **Status labels used throughout**
 >
@@ -12,7 +13,7 @@ horizontal scaling plan with node counts.
 > | **IMPLEMENTED** | exists in the repository today (file referenced) |
 > | **GAP** | the POC does something simpler or wrong for production; the fix is described |
 > | **PROPOSED** | new component or behaviour that does not exist yet |
-> | **MEASURED / EXTRAPOLATED** | taken from the load test and [`loadtest/sizing_guide.md`](loadtest/sizing_guide.md) |
+> | **MEASURED / EXTRAPOLATED** | taken from the load test and [`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) |
 >
 > Nothing in sections 3 to 7 has been run against real telephony traffic. Section 8 and 9 numbers come from one
 > laptop CPU and are extrapolated beyond 1-3 legs per node (see the limitations in section 11).
@@ -292,7 +293,7 @@ flowchart LR
 One leg = one stream at real-time pace. A box "keeps up" while every leg has p95 staleness and end-of-call lag of 2 s or less.
 Staleness is how far the live transcript trails the speaker, queueing included.
 
-Whole machine (16 threads, one process), run `20261007T202154Z` ([final results](loadtest/final_result.md)), every saturation point re-confirmed:
+Whole machine (16 threads, one process), run `20261007T202154Z` ([final results](../loadtest/final_result.md)), every saturation point re-confirmed:
 
 | Model, profile | Max legs kept up | Latency vs load (stale P95 / pass RTF P95) |
 |---|---|---|
@@ -404,7 +405,7 @@ therefore needs several boxes, and the unit of scale is **another edge box**, no
 
 ### 9.3 Estimated number of edge boxes (EXTRAPOLATED, confidence Low to Very low)
 
-Numbers come from [`loadtest/sizing_guide.md`](loadtest/sizing_guide.md): the measured saturation point x 0.70 headroom / 1.10
+Numbers come from [`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md): the measured saturation point x 0.70 headroom / 1.10
 overhead, plus at least 10% spare boxes. **Edge boxes** shows the central estimate and, in parentheses, the range if the true
 per-box capacity is one leg higher or lower than the 1-leg resolution of the test. RAM is per box, not a fleet total.
 
@@ -435,7 +436,7 @@ Target at the operating load (MEASURED): Whisper pass RTF <= 0.40, P95 staleness
 Targets (dense): Whisper RTF <= 0.35 / P95 <= 1.6 s, Qwen3 INT4 <= 0.35 / <= 0.9 s, Qwen3 INT8 <= 0.40 / <= 1.0 s.
 
 Per-target CPU threads, physical cores and fleet RAM, and the measured-vs-extrapolated breakdown, are in
-[`loadtest/sizing_guide.md`](loadtest/sizing_guide.md).
+[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md).
 
 How to read this honestly:
 
@@ -444,7 +445,7 @@ How to read this honestly:
 - **Whisper vs Qwen3.** Qwen3-0.6B is more accurate in the benchmark (EN WER 0.037 for INT8 vs 0.130 for Whisper tiny;
   Whisper tiny is poor on Mandarin). INT4 needs the same number of boxes as INT8 with 1 GB less RAM per box and about 12% less
   compute per pass; its EN WER is 0.038 once the one clip it returned empty is excluded (set the language explicitly or retry on
-  empty output, see [`benchmark/final_result.md`](benchmark/final_result.md), section 4). Whisper degrades more gracefully when overloaded (section 8.2); Qwen is more accurate but needs the skip-ahead fix first.
+  empty output, see [`../benchmark/final_result.md`](../benchmark/final_result.md), section 4). Whisper degrades more gracefully when overloaded (section 8.2); Qwen is more accurate but needs the skip-ahead fix first.
   Choose on accuracy for the target languages, measured on real 8 kHz call audio.
 - **Blast radius** is tiny: one box loses 1-3 legs, so a box failure is a small event as long as spare capacity exists.
 - Rows for 50 legs and above are **extrapolations** of 1-3 measured legs; confidence falls from Low (50-200) to Very low (500+).

@@ -588,6 +588,7 @@ jq -s 'group_by(.trace_id)[] | {trace_id: .[0].trace_id, runs: [.[] | {name, lat
 
 | Document | Contents |
 |---|---|
+| [`docs/arch/system_architecture.md`](docs/arch/system_architecture.md) | System architecture: POC as built plus the recommended production architecture, decisions and risks |
 | [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract, AI traces |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/report/technical_report.md`](docs/report/technical_report.md) | Technical report: methodology, environment, results, bottlenecks, sizing, recommendations (figures in `docs/report/figures/`) |
@@ -596,4 +597,4 @@ jq -s 'group_by(.trace_id)[] | {trace_id: .[0].trace_id, runs: [.[] | {name, lat
 | [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |
 | [`docs/loadtest/final_result.md`](docs/loadtest/final_result.md) | Final load-test results (run `20261007T202154Z`) |
 | [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | Edge-CPU sizing for 50-1,000 concurrent legs (identical boxes; measured vs extrapolated) |
-| [`docs/deployment.md`](docs/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |
+| [`docs/arch/deployment.md`](docs/arch/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |

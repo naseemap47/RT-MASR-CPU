@@ -4,7 +4,7 @@
 > ([raw](../../loadtest/results/20261007T202154Z_loadtest_raw.json) · [summary](../../loadtest/results/20261007T202154Z_loadtest_summary.md) ·
 > [curated results](final_result.md)). Sizing model: run `20261007T203650Z`
 > ([JSON](../../loadtest/results/20261007T203650Z_sizing.json) · [generated guide](../../loadtest/results/20261007T203650Z_sizing_guide.md)).
-> How the load test and sizing model work: [`loadtest.md`](loadtest.md). Production design: [`../deployment.md`](../deployment.md).
+> How the load test and sizing model work: [`loadtest.md`](loadtest.md). Production design: [`../arch/deployment.md`](../arch/deployment.md).
 >
 > **Every box count in this guide is EXTRAPOLATED.** The test machine saturates at 1-3 legs, so nothing at 50+ legs was run.
 > Section 2 explains exactly which numbers were measured and which were derived, assumed or extrapolated.
@@ -121,7 +121,7 @@ All six saturation points were re-confirmed. Two details matter for sizing:
 - **The box is not CPU-saturated at the SLO limit.** Even at saturation the 16 threads are only 38-68% busy (MEASURED). Each leg
   is limited by how fast one pass of one stream finishes, not by total CPU, so more threads in one process do not add legs in
   proportion. An earlier run pinned to 4, 8 and 16 threads kept Qwen at 1 leg in all three
-  ([`../deployment.md`](../deployment.md), section 9). That is why the guide does not predict a bigger chip.
+  ([`../arch/deployment.md`](../arch/deployment.md), section 9). That is why the guide does not predict a bigger chip.
 - **The knee is sharp.** Qwen INT8 conversational goes from 0.98 s stale P95 at 1 leg to 3.11 s at 2; Whisper conversational from
   1.04 s at 2 legs to 1.51 s at 3 and 2.70 s at 4. Planning below saturation is what keeps a box away from that cliff.
 
@@ -229,7 +229,7 @@ fleet so the **average** load per box stays at the planning capacity:
 | Whisper tiny, dense | 2 legs | 1.27 | |
 
 Admission control must reject or queue the leg that would exceed the cap. An extra leg is not rejected by the engine; it makes every
-call on that box late ([`../deployment.md`](../deployment.md)).
+call on that box late ([`../arch/deployment.md`](../arch/deployment.md)).
 
 ### 5.5 Worked example: 100 conversational legs
 

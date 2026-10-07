@@ -35,6 +35,13 @@ Config-driven entrypoint
 
 Or to download all registered models in one call:
     downloader.download_all("config/config.yaml")
+
+Test audio
+----------
+    downloader.download_test_audio()
+        Fetches the test_audio/{en,cn,id}/*.wav clips from the HuggingFace
+        dataset repo naseemap47/RT-MASR-CPU into test_audio/, keeping the
+        folder layout.
 """
 
 from __future__ import annotations
@@ -51,6 +58,8 @@ from huggingface_hub import HfApi, snapshot_download
 from core.config import load_config, load_model_registry, load_server_config
 
 logger = logging.getLogger("rtmasr.download")
+
+TEST_AUDIO_REPO = "naseemap47/RT-MASR-CPU"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -223,6 +232,68 @@ class DownloadModels:
         logger.info("Downloading snapshot from '%s' → '%s' ...", repo_id, out_dir)
         snapshot_download(repo_id=repo_id, local_dir=str(out_dir))
         logger.info("Snapshot ready in '%s'.", out_dir)
+        return out_dir
+
+    def download_test_audio(
+        self,
+        repo_id: str = TEST_AUDIO_REPO,
+        target_dir: str = "test_audio",
+        force: bool = False,
+    ) -> Path:
+        """
+        Download the test audio folders from a HuggingFace dataset repo.
+
+        Every file inside a folder of the repo (``en/``, ``cn/``, ``id/``, ...)
+        is saved under *target_dir* with the same relative path. Files at the
+        repo root (``.gitattributes``, ``.gitignore``) are skipped so the local
+        ``test_audio/.gitignore`` is left alone. Files already present with the
+        size reported by the Hub are not downloaded again.
+
+        Args:
+            repo_id:    HuggingFace dataset repository ID.
+            target_dir: Local destination directory.
+            force:      Re-download every file even if it already exists.
+
+        Returns:
+            Path to *target_dir*.
+        """
+        out_dir = Path(target_dir)
+
+        info = HfApi().dataset_info(repo_id, files_metadata=True)
+        sizes = {s.rfilename: s.size or 0 for s in info.siblings if "/" in s.rfilename}
+        if not sizes:
+            raise FileNotFoundError(f"No audio folders found in dataset '{repo_id}'.")
+
+        def _complete(f: str) -> bool:
+            local = out_dir / f
+            return local.exists() and local.stat().st_size == sizes[f]
+
+        todo = sorted(sizes) if force else sorted(f for f in sizes if not _complete(f))
+        folders = ", ".join(sorted({f.split("/", 1)[0] for f in sizes}))
+        if not todo:
+            logger.info("All %d test audio files (%s) already present in '%s'.",
+                        len(sizes), folders, out_dir)
+            return out_dir
+
+        logger.info("Downloading %d test audio file(s) from dataset '%s' → '%s' ...",
+                    len(todo), repo_id, out_dir)
+        for f in todo:
+            logger.info("  %-40s %8.1f KB", f, sizes[f] / 1e3)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=info.sha,
+            allow_patterns=todo,
+            local_dir=str(out_dir),
+            force_download=force,
+        )
+
+        bad = [f for f in sizes if not _complete(f)]
+        if bad:
+            raise RuntimeError(f"Download incomplete or size mismatch in '{out_dir}': {bad}")
+        logger.info("Test audio ready in '%s' (%d files in %s).", out_dir, len(sizes), folders)
         return out_dir
 
     # ------------------------------------------------------------------
@@ -443,9 +514,18 @@ if __name__ == "__main__":
         help="Path to the top-level config.yaml (default: config/config.yaml).",
     )
     parser.add_argument(
+        "--test-audio",
+        action="store_true",
+        help=(
+            f"Download the test audio clips from the HuggingFace dataset '{TEST_AUDIO_REPO}' "
+            "into test_audio/. On its own it downloads no models; combine with --model "
+            "to fetch both."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-download even if model files already exist.",
+        help="Force re-download even if model / audio files already exist.",
     )
     parser.add_argument(
         "--dry-run",
@@ -456,6 +536,9 @@ if __name__ == "__main__":
 
     with start_run("download"):
         downloader = DownloadModels()
+
+        if args.test_audio:
+            downloader.download_test_audio(force=args.force)
 
         # Shorthand whisper aliases — dash and underscore forms both accepted.
         # Note: whisper_int8 / fp16 / fp32 are also full registry entries, so they
@@ -494,5 +577,5 @@ if __name__ == "__main__":
                 raise SystemExit(1)
             model_cfg_path = cfg_dir / entry["config"]
             downloader.download_from_config(str(model_cfg_path), force=args.force, dry_run=args.dry_run)
-        else:
+        elif not args.test_audio:
             downloader.download_all(config_path=args.config, force=args.force, dry_run=args.dry_run)

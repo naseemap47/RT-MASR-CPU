@@ -6,7 +6,8 @@ downloader, so every entry point prints the same boxed terminal panel:
 
 * unknown name / id   -> "did you mean ..." plus a table of what is available
                          (with a downloaded yes/NO column);
-* files not on disk   -> what is missing and the exact download command.
+* files not on disk   -> what is missing and the exact download command;
+* test audio missing  -> which clips are missing and the ``--test-audio`` command.
 
 Registry names (``config/models/models.yaml``, e.g. ``qwen3_onnx_0.6b_int8``)
 are what the downloader and ``RT_MASR_MODEL`` take. Benchmark / load-test ids
@@ -32,6 +33,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DOWNLOAD_SCRIPT = "src/utils/download_utils.py"
+TEST_AUDIO_DIR = "test_audio"
 
 _DEFAULT_ONNX_FILES = [
     "decoder_init.int8.onnx", "decoder_step.int8.onnx", "embed_tokens.bin",
@@ -295,6 +297,14 @@ def download_command(registry_name: str) -> str:
     return f"uv run python {DOWNLOAD_SCRIPT} --model {registry_name}"
 
 
+def audio_download_command() -> str:
+    return f"uv run python {DOWNLOAD_SCRIPT} --test-audio"
+
+
+def _shorten(items: Sequence[str], n: int = 6) -> str:
+    return ", ".join(items[:n]) + (f"  (+{len(items) - n} more)" if len(items) > n else "")
+
+
 def close_matches(name: str, choices: Iterable[str], n: int = 3) -> list[str]:
     choices = list(choices)
     hits = difflib.get_close_matches(name, choices, n=n, cutoff=0.5)
@@ -329,18 +339,42 @@ def bench_table(entries: Iterable[dict], registry: Optional[list[dict]] = None) 
 
 def not_downloaded_panel(label: str, cfg: dict, missing: list[str],
                          registry_name: Optional[str], level: str = "error") -> Panel:
-    shown = ", ".join(missing[:6]) + (f"  (+{len(missing) - 6} more)" if len(missing) > 6 else "")
     p = Panel("Model not downloaded", level)
     p.field("Model", label, "bold")
     if registry_name and registry_name != label:
         p.field("Registry", registry_name)
     p.field("Location", model_dir(cfg))
-    p.field("Missing", shown, "yellow")
+    p.field("Missing", _shorten(missing), "yellow")
     p.blank().heading("Download it with")
     if registry_name:
         p.command(download_command(registry_name))
     else:
         p.note(f"{DOWNLOAD_SCRIPT}, using the `download:` block of its model YAML.")
+    return p
+
+
+def is_test_audio(path: str | Path) -> bool:
+    """True if *path* lies inside ``test_audio/`` (i.e. ``--test-audio`` would fetch it)."""
+    return _rel(path).split(os.sep, 1)[0] == TEST_AUDIO_DIR
+
+
+def has_test_audio() -> bool:
+    """True if ``test_audio/`` holds at least one ``.wav`` file."""
+    return next((ROOT / TEST_AUDIO_DIR).glob("**/*.wav"), None) is not None
+
+
+def audio_missing_panel(missing: Sequence[str] = (), level: str = "error", where: str = "") -> Panel:
+    """Test clips are not on disk. ``missing`` empty means ``test_audio/`` has no WAV at all."""
+    p = Panel("Test audio not downloaded", level)
+    p.field("Location", f"{TEST_AUDIO_DIR}/")
+    if where:
+        p.field("Listed in", where)
+    p.field("Missing", _shorten([_rel(m) for m in missing]) if missing else "no .wav files", "yellow")
+    p.blank().heading("Download it with").command(audio_download_command())
+    outside = [m for m in missing if not is_test_audio(m)]
+    if outside:
+        p.blank().note(f"{_shorten([_rel(m) for m in outside], 3)} is outside {TEST_AUDIO_DIR}/ and "
+                       f"not part of the download; fix the path{f' in {where}' if where else ''}.")
     return p
 
 

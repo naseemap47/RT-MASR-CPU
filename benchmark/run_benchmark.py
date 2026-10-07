@@ -39,7 +39,8 @@ from benchmark.runners.latency_runner import LatencyRunner
 from benchmark.runners.load_timer import measure_load_with_engine, release_memory
 from benchmark.runners.streaming_concurrency_runner import StreamingConcurrencyRunner
 from src.core.model_check import (
-    bench_entries_not_downloaded, bench_id_hints, bench_table, report, unknown_name_panel,
+    audio_missing_panel, bench_entries_not_downloaded, bench_id_hints, bench_table, report,
+    unknown_name_panel,
 )
 from src.core.runlog import start_run
 
@@ -272,11 +273,14 @@ def _run(args: argparse.Namespace, run) -> None:
     # Audio files (latency) — warn about, and drop, missing files up front
     all_audio = collect_audio_files(cfg.get("audio", {}))
     missing = [a for a in all_audio if not os.path.exists(a)]
-    for a in missing:
-        logger.warning("audio file missing, skipped: %s", a)
     all_audio = [a for a in all_audio if os.path.exists(a)]
+    if missing:
+        panel = audio_missing_panel(missing, where=f"'audio' in {os.path.relpath(config_path)}")
+        if all_audio:
+            panel.level = "warning"
+            panel.blank().note("Missing clips are skipped in this run; the others are used.")
+        report(logger, panel)
     if not all_audio:
-        logger.error("No audio files found. Check 'audio' in bench_config.yaml.")
         sys.exit(1)
 
     # Concurrency workload: identical for every config and every legs level

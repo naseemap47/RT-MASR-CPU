@@ -136,7 +136,7 @@ benchmark/                  Offline benchmark pipeline (runners, metrics, report
 loadtest/                   Load test (call-leg simulator, saturation search) + sizing model
 tests/                      Server / session / streaming tests
 models/                     Downloaded weights (git-ignored)
-test_audio/{en,cn,id}/      Test WAV files (git-ignored)
+test_audio/{en,cn,id}/      Test WAV files (git-ignored; download with --test-audio)
 docs/                       Architecture, changelog, benchmark and load-test docs
 logs/                       Per-run capture (git-ignored): logs/<pipeline>/<UTC>/
 ```
@@ -303,14 +303,28 @@ that is free at that moment.
 
 ## Test audio
 
-WAV files are git-ignored, so add your own under `test_audio/`. The folder name
-sets the language the UI shows for a sample: `en`, `cn` (or `zh`), `id`.
+WAV files are git-ignored. The project's test clips are on the Hugging Face dataset
+[`naseemap47/RT-MASR-CPU`](https://huggingface.co/datasets/naseemap47/RT-MASR-CPU);
+download them into `test_audio/` with the same folder layout (no token needed):
+
+```bash
+uv run python src/utils/download_utils.py --test-audio           # audio only
+uv run python src/utils/download_utils.py --test-audio --force   # re-download every clip
+uv run python src/utils/download_utils.py --test-audio --model qwen3_onnx_0.6b_int8   # audio + one model
+```
+
+Files already present with the right size are skipped. If the clips are missing,
+the server, `check_models.py`, the benchmark and the load test print a
+"Test audio not downloaded" panel with this command, like they do for models.
+You can also add your own
+WAVs under `test_audio/`. The folder name sets the language the UI shows for a
+sample: `en`, `cn` (or `zh`), `id`.
 
 ```
 test_audio/
-  en/  librispeech_0_1089_0.wav  librispeech_1_1089_1.wav  librispeech_2_1089_2.wav
-  cn/  OSR_cn_000_0072_8k.wav  OSR_cn_000_0073_8k.wav
-  id/  ind_001.wav  ind_002.wav
+  en/  librispeech_0_1089_0.wav  librispeech_1_1089_1.wav  librispeech_2_1089_2.wav  harvard.wav  jackhammer.wav
+  cn/  OSR_cn_000_0072_8k.wav  OSR_cn_000_0073_8k.wav  OSR_cn_000_0074_8k.wav  OSR_cn_000_0075_8k.wav
+  id/  ind_001.wav  ind_002.wav  ind_003.wav
 ```
 
 These are the files `benchmark/configs/bench_config.yaml` and

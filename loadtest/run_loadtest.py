@@ -38,7 +38,8 @@ from loadtest.runners.ramp import RampResult, run_ramp
 from loadtest.runners.worker_pool import InsufficientMemory, WorkerPool
 from loadtest.topology import available_cpus, cpu_set, split_cpus
 from src.core.model_check import (
-    bench_entries_not_downloaded, bench_id_hints, bench_table, report, unknown_name_panel,
+    audio_missing_panel, bench_entries_not_downloaded, bench_id_hints, bench_table, report,
+    unknown_name_panel,
 )
 from src.core.runlog import current_run, start_run
 
@@ -240,8 +241,15 @@ def _run(args: argparse.Namespace, run) -> None:
             sys.exit("No downloaded models left to load-test.")
 
     call_audio = [a for a in cfg["call"]["audio"] if os.path.exists(a)]
+    missing_audio = [a for a in cfg["call"]["audio"] if not os.path.exists(a)]
+    if missing_audio:
+        panel = audio_missing_panel(missing_audio, where=f"call.audio in {os.path.relpath(config_path)}")
+        if call_audio:
+            panel.level = "warning"
+            panel.blank().note("Missing clips are skipped in this run; the others are used.")
+        report(logger, panel)
     if not call_audio:
-        sys.exit("None of call.audio exists.")
+        sys.exit(1)
     ramp_levels = _ints(args.levels) or cfg["ramp"]["levels"]
     ramp_opts = {
         "refine": bool(cfg["ramp"].get("refine", True)) and not args.no_refine,

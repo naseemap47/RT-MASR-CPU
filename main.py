@@ -50,7 +50,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from src.core.config import load_server_config
-from src.core.model_check import ModelSetupError, check_registry_model, report
+from src.core.model_check import (
+    ModelSetupError, audio_missing_panel, check_registry_model, has_test_audio, report,
+)
 from src.core.runlog import begin_run, in_pytest
 from src.engines.live_call_session import LiveCallSession
 from src.engines.whisper_streaming import StreamingConfig, WhisperSlidingWindowStreamer
@@ -157,6 +159,10 @@ async def lifespan(app: FastAPI):
         os._exit(1)
     _model_ready = True
     logger.info("Engine ready: %s (stream mode: %s)", _active_model_name, _stream_mode())
+    if not has_test_audio():
+        report(logger, audio_missing_panel(level="warning").blank().note(
+            "The server still runs: the UI sample list stays empty until you download "
+            "the clips, but you can load a local WAV."))
     try:
         yield
     finally:

@@ -57,7 +57,8 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from core.model_check import (  # noqa: E402
-    Panel, download_command, missing_files, registry_table, report, unknown_name_panel,
+    Panel, audio_missing_panel, download_command, is_test_audio, missing_files, registry_table,
+    report, unknown_name_panel,
 )
 
 RESULT_TAG = "@@RESULT@@ "
@@ -455,7 +456,10 @@ def _main(args: argparse.Namespace) -> int:
 
     audio = args.audio
     if not (ROOT / audio).is_file() and not Path(audio).is_file():
-        logger.error("Test audio not found: %s", audio)
+        if is_test_audio(audio):
+            report(logger, audio_missing_panel([audio], where="--audio"))
+        else:
+            logger.error("Test audio not found: %s", audio)
         return 1
     audio = str(Path(audio).resolve()) if Path(audio).is_file() else str(ROOT / audio)
 

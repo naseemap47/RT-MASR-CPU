@@ -220,12 +220,15 @@ __marimo__/
 # files
 *.pdf
 benchmark/results/*.json
-benchmark/results/*.md
+# benchmark/results/*.md
 loadtest/results/*.json
-loadtest/results/*.md
+# loadtest/results/*.md
 *.jpg
 *.txt
 
 # Per-run logs (keep the empty tree)
 logs/*
 !logs/.gitkeep
+
+# videos
+*.webm

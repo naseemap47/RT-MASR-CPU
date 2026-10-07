@@ -6,6 +6,7 @@ Every CLI / pipeline invocation creates a directory::
     logs/<pipeline>/<UTC stamp>/
         run.log          # stdout, stderr, and formatted log records
         run.meta.json    # argv, pid, timing, exit code, artifact paths
+        traces.jsonl     # AI observability: one JSON run per model inference
         workers/         # child-process captures (load-test workers, model checks)
 
 The UTC stamp matches the one used for benchmark / load-test result files, so a
@@ -22,6 +23,7 @@ Environment:
     RT_MASR_LOG_LEVEL   DEBUG / INFO / WARNING / ERROR (default: INFO)
     RT_MASR_NO_LOG=1    disable file capture (console logging still works if
                         the caller configures it)
+    RT_MASR_OBSERVE=0   disable traces.jsonl (AI inference traces)
 """
 from __future__ import annotations
 
@@ -187,6 +189,7 @@ class RunSession:
         self.dir = logs_root() / pipeline / self.stamp
         self.log_path = self.dir / "run.log"
         self.meta_path = self.dir / "run.meta.json"
+        self.traces_path = self.dir / "traces.jsonl"
         self.started_at = ""
         self.finished_at = ""
         self.exit_code: int | None = None
@@ -235,9 +238,17 @@ class RunSession:
             self._started = True
             _active = self
 
+        self.traces_path = self.dir / "traces.jsonl"
+        try:
+            from src.core.observe import attach_file
+            attach_file(self.traces_path)
+            self.artifacts["traces"] = str(self.traces_path)
+        except Exception:
+            pass
+
         logging.getLogger("rtmasr").info(
-            "run started  pipeline=%s  stamp=%s  log=%s",
-            self.pipeline, self.stamp, self.log_path,
+            "run started  pipeline=%s  stamp=%s  log=%s  traces=%s",
+            self.pipeline, self.stamp, self.log_path, self.traces_path,
         )
         return self
 
@@ -259,6 +270,11 @@ class RunSession:
                 "run finished  pipeline=%s  stamp=%s  duration_s=%.2f  exit=%s",
                 self.pipeline, self.stamp, duration, exit_code,
             )
+            try:
+                from src.core.observe import detach
+                detach()
+            except Exception:
+                pass
             if self._handler is not None:
                 root = logging.getLogger()
                 root.removeHandler(self._handler)
@@ -417,5 +433,10 @@ def configure_child_logging(run_dir: str | Path, name: str) -> Path:
     sys.stderr = _Tee(sys.stderr, fh)
     level = parse_level(os.environ.get("RT_MASR_LOG_LEVEL"))
     _install_root_logger(level, sys.stdout)
+    try:
+        from src.core.observe import attach_file
+        attach_file(workers / f"{name}.traces.jsonl")
+    except Exception:
+        pass
     logging.getLogger("rtmasr").info("worker log attached  name=%s  file=%s", name, path)
     return path

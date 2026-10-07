@@ -61,7 +61,8 @@ config/
   models/*.yaml              per-model settings (download, engine, inference, streaming, ort_session)
 src/
   core/config.py             YAML loading + registry resolution (config.yaml -> models.yaml -> model yaml)
-  core/runlog.py             per-run log session: logs/<pipeline>/<UTC>/run.log + metadata
+  core/runlog.py             per-run log session: logs/<pipeline>/<UTC>/run.log + run.meta.json
+  core/observe.py            AI inference traces (LangSmith-style JSONL, no UI): traces.jsonl
   engines/
     live_call_session.py     per-call state: PCM normalisation, energy gate, VAD boundary, T0-T3 timestamps, metrics
     qwen3_onnx_engine.py     Qwen3-ASR on ONNX Runtime (mel -> encoder -> prompt -> prefill -> greedy decode)
@@ -76,7 +77,7 @@ src/
 benchmark/                   offline benchmark (see section 7)
 loadtest/                    load test + sizing (see section 8)
 tests/                       server/session/streaming tests
-logs/                        per-run capture: logs/<pipeline>/<UTC>/run.log + run.meta.json
+logs/                        per-run capture: run.log, run.meta.json, traces.jsonl
 docs/                        architecture, benchmark, load test, deployment, this guide
 ```
 
@@ -120,6 +121,7 @@ docs/                        architecture, benchmark, load test, deployment, thi
 | **Saturation point (`l_sat`)** | Highest number of simultaneous legs at which every leg still keeps up | load test |
 | **Headroom** | Running each edge box below saturation (70%) so bursts do not collapse latency | sizing |
 | **CPU threads** | Logical CPUs pinned on this edge machine (a physical core has two on SMT) | `loadtest/topology.py` |
+| **Trace / run** | One JSONL record per model inference, nested under a live call or load-test leg (`trace_id` / `parent_id`). No UI | `src/core/observe.py`, `logs/.../traces.jsonl` |
 
 ---
 
@@ -190,7 +192,9 @@ The loop pulls one message at a time:
 
 Inference never runs on the event loop: `_run_inference` (and the Whisper `run_in_executor(None, streamer.step)`) run in
 the default thread pool, so frames keep arriving and `/api/health` stays responsive. **All calls share one engine
-instance** (`_engine`), so weights exist once per process.
+instance** (`_engine`), so weights exist once per process. The executor copies `contextvars` so each pass stays nested
+under the call's observability parent (`src/core/observe.py`). `mark_call_start` / `mark_call_end` open and close that
+parent; every engine `transcribe` / `transcribe_stream` writes a child run to `traces.jsonl`.
 
 ### 4.4 The session: audio in (`LiveCallSession.process_pcm_bytes`)
 
@@ -418,9 +422,11 @@ only; `main.py` hard-codes those values. The `streaming:` block of the **Whisper
 | Whisper streamer | `tests/test_whisper_streaming.py` | Unit splitting (words / CJK), common prefix ignores case and punctuation, commit only after two agreeing passes, garbage tail never committed, committed text append-only with no duplicates, window slides and bounded cost, hard-cap force-commit, silence flush, pure silence never calls the engine, language lock, WebSocket end-to-end with a fake engine |
 | Benchmark | `benchmark/tests/*` (about 90 tests) | Statistics, WER/CER, runners with fake engines, reporters, load timer, streaming concurrency (kept up, aborts, global leg offsets) |
 | Load test | `loadtest/tests/*` (28 tests) | Topology, tiled call audio, ramp logic (stops, bisects, confirms, memory guard), sizing arithmetic, USL fit, rendered report |
+| Logging | `tests/test_runlog.py` | Run directory, `run.log` / `run.meta.json`, env overrides, pytest skip |
+| AI traces | `tests/test_observe.py` | Nested call/inference JSONL, errors, stream wrap, no waveform stored, `RT_MASR_OBSERVE=0` |
 
 Run: `uv run pytest benchmark/tests loadtest/tests` (about 120 tests, models not needed) and
-`uv run pytest tests/test_live_call_session.py`. Fake engines are used so tests are fast and need no model files.
+`uv run pytest tests/test_live_call_session.py tests/test_runlog.py tests/test_observe.py`. Fake engines are used so tests are fast and need no model files.
 
 ---
 
@@ -794,8 +800,8 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b --runs 1 
 uv run python loadtest/run_loadtest.py --list              # list load-test runs (model x profile)
 uv run python loadtest/run_loadtest.py --levels 1,2 --duration 15 --models whisper_int8_tiny --cpus 4
 uv run python loadtest/run_sizing.py                       # build a sizing guide from the newest raw result
-ls logs/loadtest/latest/                                   # console capture of the last load-test run
-uv run pytest benchmark/tests loadtest/tests tests/test_live_call_session.py tests/test_runlog.py
+ls logs/loadtest/latest/                                   # run.log, run.meta.json, traces.jsonl
+uv run pytest benchmark/tests loadtest/tests tests/test_live_call_session.py tests/test_runlog.py tests/test_observe.py
 ```
 
 ### Where to change things
@@ -812,6 +818,8 @@ uv run pytest benchmark/tests loadtest/tests tests/test_live_call_session.py tes
 | Change the pass/fail SLO of the load test | `slo.lag_threshold_s` in `loadtest/configs/loadtest_config.yaml` |
 | Change headroom / spares / overhead | `SizingAssumptions` in `loadtest/sizing/model.py`, or `run_sizing.py --headroom ...` |
 | Add a model to the load test | an `id` under `models:` in `loadtest/configs/loadtest_config.yaml`. That id must already exist in `benchmark/configs/bench_config.yaml`, which maps it to `backend` and `model_config`. `--models` only selects from the load-test roster. |
+| Turn AI traces off | `RT_MASR_OBSERVE=0` (still writes `run.log`) |
+| Change what an inference run records | `src/core/observe.py` (`record_asr`, `audio_inputs`, `_METRIC_KEYS`) |
 
 ### A good 5-minute demo flow
 

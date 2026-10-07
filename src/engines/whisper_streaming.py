@@ -239,9 +239,20 @@ class WhisperSlidingWindowStreamer:
         window_start_s = self._window_start_samples / sr
 
         t0 = time.perf_counter()
-        result = self.engine.transcribe(
-            window, language=self.language, beam_size=cfg.beam_size, fallback=cfg.fallback,
-        )
+        try:
+            try:
+                from src.core.observe import bound
+            except ImportError:
+                from core.observe import bound
+            ctx = bound(window_s=round(window_s, 3), window_start_s=round(window_start_s, 3),
+                        flush=flush, pass_kind="sliding_window")
+        except ImportError:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+        with ctx:
+            result = self.engine.transcribe(
+                window, language=self.language, beam_size=cfg.beam_size, fallback=cfg.fallback,
+            )
         infer_s = time.perf_counter() - t0
 
         lang = result.get("language") or None

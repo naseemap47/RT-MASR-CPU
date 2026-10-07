@@ -280,8 +280,10 @@ async def _run_inference(
         stage_timing: timing dict from the final ("", timing) sentinel,
                       or None if the generator produced no output
     """
+    import contextvars
     import numpy as np  # local import — already loaded, no cost
     loop = asyncio.get_event_loop()
+    ctx = contextvars.copy_context()
 
     def _collect() -> tuple[list[str], dict | None]:
         deltas: list[str] = []
@@ -293,7 +295,7 @@ async def _run_inference(
                 stage_timing = timing
         return deltas, stage_timing
 
-    return await loop.run_in_executor(None, _collect)
+    return await loop.run_in_executor(None, lambda: ctx.run(_collect))
 
 
 class _CallState:
@@ -358,6 +360,14 @@ async def _handle_audio_vad(
 
     engine = get_engine()
     boundary = session.find_vad_boundary()
+    try:
+        from src.core.observe import bound as _obs_bound
+    except ImportError:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def _obs_bound(**_k):
+            yield
 
     if boundary is not None:
         # ── Commit path: utterance boundary detected ───────────────────────
@@ -367,7 +377,8 @@ async def _handle_audio_vad(
         first_token_noted = session.first_token_time is not None
         utterance_audio = session.pop_utterance(boundary)
 
-        deltas, stage_timing = await _run_inference(engine, utterance_audio, state.language)
+        with _obs_bound(pass_kind="commit"):
+            deltas, stage_timing = await _run_inference(engine, utterance_audio, state.language)
 
         if deltas and not first_token_noted:
             session.mark_first_token()  # T3
@@ -382,7 +393,8 @@ async def _handle_audio_vad(
         t_infer_start = session.mark_infer_start()
         first_token_noted = session.first_token_time is not None
 
-        deltas, stage_timing = await _run_inference(engine, session.audio_buffer, state.language)
+        with _obs_bound(pass_kind="interim"):
+            deltas, stage_timing = await _run_inference(engine, session.audio_buffer, state.language)
 
         if deltas and not first_token_noted:
             session.mark_first_token()  # T3
@@ -449,7 +461,11 @@ async def _handle_audio_sliding(
 
     t_infer_start = session.mark_infer_start()
     try:
-        update = await asyncio.get_running_loop().run_in_executor(None, streamer.step)
+        import contextvars
+        ctx = contextvars.copy_context()
+        update = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: ctx.run(streamer.step),
+        )
     except Exception as exc:                        # keep the call alive on a bad pass
         logger.exception("sliding-window pass failed: %s", exc)
         return carry
@@ -559,8 +575,10 @@ async def websocket_call_stream(websocket: WebSocket):
                     if streamer is not None:
                         # Finalise the window: transcribe what is left, commit everything.
                         t_infer_start = session.mark_infer_start()
+                        import contextvars
+                        ctx = contextvars.copy_context()
                         update = await asyncio.get_running_loop().run_in_executor(
-                            None, streamer.finish
+                            None, lambda: ctx.run(streamer.finish),
                         )
                         infer_duration_s = time.time() - t_infer_start
                         if update is not None and update.full_text and session.first_token_time is None:
@@ -602,6 +620,11 @@ async def websocket_call_stream(websocket: WebSocket):
                     metrics["total_call_time_s"] = round(total_call_time, 2)
                     logger.info("call ended  duration_s=%.2f  chars=%d",
                                 total_call_time, len(final_text or ""))
+                    session.mark_call_end(outputs={
+                        "text": final_text,
+                        "stream_mode": metrics.get("stream_mode"),
+                        "total_call_time_s": metrics.get("total_call_time_s"),
+                    })
 
                     await websocket.send_json({
                         "type": "call_ended",
@@ -612,7 +635,9 @@ async def websocket_call_stream(websocket: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("websocket disconnected")
+        session.mark_call_end()
     finally:
+        session.mark_call_end()
         reader.cancel()
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 This document describes how the proof of concept is built **as it exists in the
 code today**: components, the per-call streaming flow, the WebSocket protocol,
 the latency metrics and where their timestamps are captured, the engine
-contract, and configuration resolution. Historical design changes are in
+contract, configuration resolution, and AI inference traces. Historical design changes are in
 [`changes.md`](changes.md); the benchmark harness is described in
 [`../benchmark/benchmarking.md`](../benchmark/benchmarking.md).
 
@@ -59,6 +59,8 @@ flowchart LR
 | Shared audio helpers | `src/utils/audio_utils.py` | Audio loading, 128-bin mel spectrogram for Qwen3, silence split points for long files |
 | Vendored Whisper decoding | `src/whisper/` | Tokenizer, beam search / temperature fallback and segment logic (from `whisper-onnx-cpu`), driven by ONNX sessions |
 | Configuration | `src/core/config.py`, `config/` | Resolve the active model from the registry |
+| Per-run logging | `src/core/runlog.py` | `logs/<pipeline>/<UTC>/run.log` and `run.meta.json` for every CLI / server run |
+| AI traces | `src/core/observe.py` | LangSmith-style JSONL runs in `traces.jsonl` (one object per inference; no UI) |
 | Model acquisition | `src/utils/download_utils.py` | Download weights from Hugging Face or the PINTO model zoo |
 
 ---
@@ -365,7 +367,35 @@ project root (the parent of `config/`).
 
 ---
 
-## 7. Known limitations
+## 7. AI observability traces
+
+There is no tracing UI. When a `RunSession` is open, `src/core/observe.py` appends
+one JSON object per *run* to `logs/<pipeline>/<UTC>/traces.jsonl`. Nesting matches
+a LangSmith trace: a live call (or load-test leg) is the parent, each model pass
+is a child.
+
+| Run | `name` / `run_type` | Opened by |
+|---|---|---|
+| Call / leg | `call` / `chain` | `LiveCallSession.mark_call_start()` (closed on `mark_call_end`) |
+| Batch transcribe | `transcribe` / `llm` | Engine `transcribe()` |
+| Streaming transcribe | `transcribe_stream` / `llm` | Engine `transcribe_stream()` via `trace_stream()` |
+
+Child runs share the parent's `trace_id` and set `parent_id` to the parent `id`.
+Thread-pool inference in `main.py` uses `contextvars.copy_context()` so a pass
+dispatched with `run_in_executor` stays under the call. Extra fields distinguish
+passes: Qwen VAD uses `pass_kind=commit|interim`; Whisper sliding-window uses
+`pass_kind=sliding_window` plus window size. Load-test workers write
+`workers/<name>.traces.jsonl`.
+
+A run records latency, status, model identity (`annotate_from_config` /
+`annotate_engine`), audio length and sample count (never the waveform), transcript
+text clipped at 4,000 characters, token counts, and stage timings (`rtf`,
+`encoder_s`, `prefill_s`, `decode_s`, …). `RT_MASR_OBSERVE=0` disables writing.
+With no session (pytest) the helpers are no-ops.
+
+---
+
+## 8. Known limitations
 
 - **Whisper streaming cost.** Each sliding-window pass re-encodes the window
   (padded to 30 s by Whisper), so tiny costs ~1 s per pass on an 8-core CPU and

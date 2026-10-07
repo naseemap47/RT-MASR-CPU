@@ -166,7 +166,7 @@ These do not matter for a browser sending 0.5 s frames at 16 kHz, and all matter
 | Whisper end of utterance | Speech followed by 0.8 s of silence flushes and empties the window (`silence_flush_s`) |
 | Cost of silence | Zero model passes. This is why the **conversational** load profile (about 47% speech) sustains more legs than the dense one |
 
-Limits for telephony (already listed in `architecture.md` section 7): a fixed energy threshold is calibrated on clean read speech;
+Limits for telephony (already listed in `architecture.md` section 8): a fixed energy threshold is calibrated on clean read speech;
 line noise, comfort noise, AGC pumping, music-on-hold and a quiet speaker all break it. A single quiet 100 ms frame ends a Qwen
 utterance, so a mid-sentence breath or dip can cut a sentence in two.
 
@@ -472,8 +472,8 @@ How to read this honestly:
 | Area | Requirement |
 |---|---|
 | **Security** | TLS (WSS) end to end, authenticated `start_call` (JWT or mTLS between gateway and nodes), per-tenant quotas, no `0.0.0.0` dev server or `reload=True`, no public `/api/samples` |
-| **Privacy** | Call audio and transcripts are personal data: do not log audio or full text, redact PII in logs, set retention on the bus, encrypt at rest |
-| **Observability** | Per leg: staleness, pass RTF, passes, gaps, aborts. Per node: active legs, queue depth. Fleet: occupancy, admission rejections, time-to-first-text. Use the load test's definitions of staleness and "kept up" so dashboards and capacity planning agree |
+| **Privacy** | Call audio and transcripts are personal data: do not log audio or full text, redact PII in logs, set retention on the bus, encrypt at rest. The POC `traces.jsonl` stores clipped transcripts (not waveforms); that is not a production privacy posture |
+| **Observability** | Per leg: staleness, pass RTF, passes, gaps, aborts. Per node: active legs, queue depth. Fleet: occupancy, admission rejections, time-to-first-text. Use the load test's definitions of staleness and "kept up" so dashboards and capacity planning agree. The POC already writes per-inference JSONL traces (`src/core/observe.py`); production still needs metrics/dashboards on top |
 | **Configuration** | Per-tenant VAD / hop / language settings loaded like the model YAML; the unused `streaming:` keys in the Qwen YAMLs (`min_buffer_samples`, `infer_every_n_chunks`) should become real settings (gap #1) |
 | **Testing** | Fake-engine unit tests exist for the runner and sizing model; add protocol tests for `seq` gaps, `format_change`, resume, and overload policy |
 

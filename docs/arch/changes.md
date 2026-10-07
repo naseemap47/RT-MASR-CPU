@@ -21,6 +21,7 @@
 | 10 | Load test and capacity sizing | 2026-10-06 |
 | 11 | Load test retargeted to edge CPU (no cloud SKU math) | 2026-10-07 |
 | 12 | Per-run logging under `logs/` | 2026-10-07 |
+| 13 | AI observability traces (`traces.jsonl`) | 2026-10-08 |
 
 ---
 
@@ -652,3 +653,18 @@ Every pipeline (`main.py`, benchmark, load test, sizing, download, check_models)
 - New `src/core/runlog.py`: each CLI invocation creates `logs/<pipeline>/<UTC stamp>/` with `run.log` (stdout/stderr tee + formatted `logging` records) and `run.meta.json` (argv, pid, duration, exit code, artifact paths). The stamp is the same one the reporters use for JSON/Markdown results.
 - Application `print()` calls in engines, runners and CLIs became `logging` (`rtmasr.*` loggers). Load-test workers and `check_models` children write under `workers/`.
 - Pytest does not auto-create log dirs (`skip_if_pytest` on the server lifespan). `RT_MASR_LOG_DIR` / `RT_MASR_LOG_LEVEL` / `RT_MASR_NO_LOG` override the defaults.
+
+---
+
+## 13. AI observability traces
+
+### Problem
+
+`run.log` is a process transcript. It does not group model calls the way a tracing product (LangSmith) does: one live call as a parent, each inference pass as a child, with inputs / outputs / latency / tokens.
+
+### Changes
+
+- New `src/core/observe.py`: JSONL writer, `Span` / `span` / `start_trace` / `trace_stream` / `record_asr`. One JSON object per run in `logs/<pipeline>/<UTC>/traces.jsonl` (`call` chain, `transcribe` / `transcribe_stream` llm). Nested via `trace_id` / `parent_id`. Waveforms are never stored (duration + sample count only); transcript text is clipped at 4,000 characters.
+- `RunSession.start` attaches that file; spawned workers get `workers/<name>.traces.jsonl`.
+- Hooked on every engine `transcribe` / `transcribe_stream`, on `LiveCallSession` start/end, and on load-test / benchmark stream legs. Thread-pool inference copies contextvars so a pass stays under its call. Qwen VAD tags `pass_kind=commit|interim`; Whisper tags `sliding_window`.
+- `RT_MASR_OBSERVE=0` disables it. No-op when no run session is open (pytest).

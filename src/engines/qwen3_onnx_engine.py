@@ -697,7 +697,7 @@ class ONNXQwen3ASR:
         infer_cfg    = cfg.get("inference", {})
         ort_cfg      = cfg.get("ort_session", {})
 
-        return cls(
+        engine = cls(
             onnx_dir       = engine_cfg.get("onnx_dir",     "models/qwen3-asr-onnx-0.6b-int8"),
             num_threads    = engine_cfg.get("num_threads",  0),
             quantize       = engine_cfg.get("quantize",     "int8"),
@@ -706,6 +706,15 @@ class ONNXQwen3ASR:
             max_new_tokens = infer_cfg.get("max_new_tokens", 512),
             chunk_sec      = infer_cfg.get("chunk_sec",      30),
         )
+        try:
+            try:
+                from src.core.observe import annotate_from_config
+            except ImportError:
+                from core.observe import annotate_from_config
+            annotate_from_config(engine, cfg, quantize=engine_cfg.get("quantize"))
+        except Exception:
+            pass
+        return engine
 
     @classmethod
     def from_config_path(cls, config_path: str) -> "ONNXQwen3ASR":
@@ -734,6 +743,23 @@ class ONNXQwen3ASR:
         language: Optional[str] = None,
     ) -> dict:
         lang = normalize_language(language) if language is not None else self.language
+        try:
+            try:
+                from src.core.observe import audio_inputs, record_asr, span, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, record_asr, span, use_engine
+            use_engine(self)
+            with span("transcribe", "llm", inputs=audio_inputs(audio_path, language=lang)) as sp:
+                result = self.pipeline.transcribe(
+                    audio_path,
+                    lang,
+                    max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
+                    chunk_sec      if chunk_sec      is not None else self._default_chunk_sec,
+                )
+                record_asr(sp, result)
+                return result
+        except ImportError:
+            pass
         return self.pipeline.transcribe(
             audio_path,
             lang,
@@ -753,11 +779,22 @@ class ONNXQwen3ASR:
         ``OnnxAsrPipeline.transcribe_stream`` for the full contract.
         """
         lang = normalize_language(language) if language is not None else self.language
-        yield from self.pipeline.transcribe_stream(
+        gen = self.pipeline.transcribe_stream(
             audio,
             lang,
             max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
         )
+        try:
+            try:
+                from src.core.observe import audio_inputs, trace_stream, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, trace_stream, use_engine
+            use_engine(self)
+            yield from trace_stream(
+                "transcribe_stream", gen, inputs=audio_inputs(audio, language=lang),
+            )
+        except ImportError:
+            yield from gen
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

@@ -114,6 +114,8 @@ main.py                     FastAPI app: UI, /api/*, /ws/call-stream
 static/                     Web UI (index.html, app.js, style.css)
 src/
   core/config.py            Config + model-registry resolution
+  core/runlog.py            Per-run log session (`run.log`, `run.meta.json`)
+  core/observe.py           AI inference traces (`traces.jsonl`, no UI)
   engines/
     live_call_session.py    Per-call buffer, energy gate, VAD, telemetry
     qwen3_onnx_engine.py    Qwen3-ASR ONNX Runtime engine
@@ -477,7 +479,7 @@ uv run pytest                                   # all of tests/ (needs models + 
 
 ---
 
-## Logs
+## Logs and AI traces
 
 Every pipeline run writes a directory under `logs/<pipeline>/<UTC stamp>/`:
 
@@ -490,14 +492,26 @@ Every pipeline run writes a directory under `logs/<pipeline>/<UTC stamp>/`:
 | `download` | `src/utils/download_utils.py` |
 | `check_models` | `src/utils/check_models.py` |
 
-Each directory has `run.log` (console + Python logging) and `run.meta.json` (argv, pid, duration, exit code, paths of result files). The UTC stamp is the same one on `benchmark/results/` and `loadtest/results/` filenames. `logs/<pipeline>/latest` is a symlink to the newest run. Load-test workers and `check_models` child processes add files under `workers/`.
+| File | What it is |
+|---|---|
+| `run.log` | Console + Python logging (`rtmasr.*`) |
+| `run.meta.json` | argv, pid, duration, exit code, paths of result files |
+| `traces.jsonl` | One JSON object per model inference (LangSmith-style run; no UI) |
+
+The UTC stamp is the same one on `benchmark/results/` and `loadtest/results/` filenames. `logs/<pipeline>/latest` is a symlink to the newest run. Load-test workers and `check_models` child processes add `workers/<name>.log` and `workers/<name>.traces.jsonl`.
+
+`run.log` is the process transcript. `traces.jsonl` is AI observability only: a live call or load-test leg is a parent `chain` run; each `transcribe` / `transcribe_stream` pass is a child `llm` run. Join a call's inferences by `trace_id`. Inputs store audio length and sample count (never the waveform). Outputs store transcript text (clipped at 4,000 characters), tokens, RTF and stage timings (`encoder_s`, `prefill_s`, `decode_s`).
 
 ```bash
 ls logs/loadtest/latest/
-# run.log  run.meta.json
+# run.log  run.meta.json  traces.jsonl
+
+# group one live call's inferences
+jq -s 'group_by(.trace_id)[] | {trace_id: .[0].trace_id, runs: [.[] | {name, latency_ms, status}]}' \
+  logs/server/latest/traces.jsonl
 ```
 
-`RT_MASR_LOG_DIR` overrides the logs root, `RT_MASR_LOG_LEVEL=DEBUG` raises verbosity, `RT_MASR_NO_LOG=1` disables file capture. The live server also reads `server.log_level` from `config/config.yaml`. Pytest does not create log dirs.
+`RT_MASR_LOG_DIR` overrides the logs root, `RT_MASR_LOG_LEVEL=DEBUG` raises verbosity, `RT_MASR_NO_LOG=1` disables file capture, `RT_MASR_OBSERVE=0` turns traces off. The live server also reads `server.log_level` from `config/config.yaml`. Pytest does not create log dirs.
 
 ---
 
@@ -523,7 +537,7 @@ ls logs/loadtest/latest/
 
 | Document | Contents |
 |---|---|
-| [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract |
+| [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract, AI traces |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
 | [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |

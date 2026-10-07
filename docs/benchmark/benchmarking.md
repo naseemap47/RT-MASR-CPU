@@ -21,7 +21,7 @@ flowchart TD
     LOOP -->|done| REP["Reporters"]
     REP --> J["benchmark/results/{UTC}_raw.json"]
     REP --> M["benchmark/results/{UTC}_summary.md"]
-    REP --> L["logs/benchmark/{UTC}/run.log"]
+    REP --> L["logs/benchmark/{UTC}/run.log + traces.jsonl"]
 ```
 
 The engine loaded in stage 1 is reused for stages 2–4. If one stage fails, that
@@ -420,6 +420,8 @@ generated `*_summary.md`.)
 |---|---|
 | `<UTC>_raw.json` | Every measurement, including raw per-run latencies, hardware fingerprint and run parameters |
 | `<UTC>_summary.md` | Hardware/software table, load, latency/RTF, CPU/memory, accuracy and concurrency tables (including *Concurrent live legs supported* in stream mode) |
+| `logs/benchmark/<UTC>/run.log` | Console + logging for that invocation (same UTC stamp) |
+| `logs/benchmark/<UTC>/traces.jsonl` | One JSON object per `transcribe` / `transcribe_stream` (stream-concurrency legs nest under a `call` chain) |
 
 Hardware fingerprint (`reporters/hardware_info.py`): CPU model, physical/logical
 cores, RAM, OS, Python and key library versions.

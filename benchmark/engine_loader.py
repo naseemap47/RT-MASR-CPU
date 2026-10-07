@@ -74,15 +74,33 @@ def load_engine(config_entry: dict) -> Any:
 
     if backend == "onnx":
         from engines.qwen3_onnx_engine import ONNXQwen3ASR
-        return ONNXQwen3ASR.from_config(model_cfg)
+        engine = ONNXQwen3ASR.from_config(model_cfg)
 
     elif backend == "transformers":
         from engines.qwen3_engine import Qwen3ASR
-        return Qwen3ASR.from_config(model_cfg)
+        engine = Qwen3ASR.from_config(model_cfg)
 
     elif backend == "whisper":
         from engines.whisper_engine import WhisperOnnxEngine
-        return WhisperOnnxEngine.from_config(model_cfg)
+        engine = WhisperOnnxEngine.from_config(model_cfg)
+    else:
+        engine = None
+
+    if engine is not None:
+        try:
+            try:
+                from src.core.observe import annotate_engine
+            except ImportError:
+                from core.observe import annotate_engine
+            annotate_engine(
+                engine,
+                name=config_entry.get("id") or model_cfg.get("name"),
+                backend=backend,
+                display_name=config_entry.get("display_name") or model_cfg.get("display_name"),
+            )
+        except Exception:
+            pass
+        return engine
 
     else:
         raise ValueError(

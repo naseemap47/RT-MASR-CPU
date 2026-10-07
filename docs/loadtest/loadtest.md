@@ -71,12 +71,16 @@ python3 loadtest/run_loadtest.py                                  # every model 
 python3 loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny
 python3 loadtest/run_loadtest.py --levels 1,2 --duration 15      # smoke run
 # Console + logging for the run: logs/loadtest/<UTC>/run.log  (same UTC stamp as the result files)
+# AI traces (one JSON run per inference, nested per leg): logs/loadtest/<UTC>/traces.jsonl
+# Worker processes add workers/<name>.log and workers/<name>.traces.jsonl
 python3 loadtest/run_sizing.py --input <dense_raw.json> <conv_raw.json>
 python3 loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fraction 0.2 --legs 50,100,1000
 ```
 
 On restricted sandboxes set `NUMBA_CACHE_DIR=/tmp/numba_cache` (the scripts do this themselves). Do not run other heavy work while testing;
-results are only as clean as the machine.
+results are only as clean as the machine. Each load-test run also writes AI traces (`traces.jsonl`, plus per-worker
+files under `workers/`); a leg is a parent `call` chain and each inference pass is a child. `RT_MASR_OBSERVE=0` turns
+that off.
 
 ## Sizing model
 

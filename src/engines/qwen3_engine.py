@@ -553,7 +553,7 @@ class Qwen3ASR:
         dtype_str = engine_cfg.get("dtype", "bfloat16")
         dtype = get_dtype(dtype_str)
 
-        return cls(
+        engine = cls(
             model_path               = engine_cfg.get("model_path",               "models/qwen3-asr-0.6b"),
             dtype                    = dtype,
             device_map               = engine_cfg.get("device_map",               "cpu"),
@@ -562,6 +562,15 @@ class Qwen3ASR:
             language                 = engine_cfg.get("language",                 None),
             chunk_sec                = infer_cfg.get("chunk_sec",                 30),
         )
+        try:
+            try:
+                from src.core.observe import annotate_from_config
+            except ImportError:
+                from core.observe import annotate_from_config
+            annotate_from_config(engine, cfg, dtype=dtype_str)
+        except Exception:
+            pass
+        return engine
 
     @classmethod
     def from_config_path(cls, config_path: str) -> "Qwen3ASR":
@@ -591,6 +600,23 @@ class Qwen3ASR:
     ) -> dict:
         """Transcribe an audio file. Returns the same dict as ONNXQwen3ASR."""
         lang = normalize_language(language) if language is not None else self.language
+        try:
+            try:
+                from src.core.observe import audio_inputs, record_asr, span, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, record_asr, span, use_engine
+            use_engine(self)
+            with span("transcribe", "llm", inputs=audio_inputs(audio_path, language=lang)) as sp:
+                result = self.pipeline.transcribe(
+                    audio_path,
+                    lang,
+                    max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
+                    chunk_sec      if chunk_sec      is not None else self._default_chunk_sec,
+                )
+                record_asr(sp, result)
+                return result
+        except ImportError:
+            pass
         return self.pipeline.transcribe(
             audio_path,
             lang,
@@ -611,11 +637,22 @@ class Qwen3ASR:
         ``_Qwen3Pipeline.transcribe_stream`` for the full contract.
         """
         lang = normalize_language(language) if language is not None else self.language
-        yield from self.pipeline.transcribe_stream(
+        gen = self.pipeline.transcribe_stream(
             audio,
             lang,
             max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
         )
+        try:
+            try:
+                from src.core.observe import audio_inputs, trace_stream, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, trace_stream, use_engine
+            use_engine(self)
+            yield from trace_stream(
+                "transcribe_stream", gen, inputs=audio_inputs(audio, language=lang),
+            )
+        except ImportError:
+            yield from gen
 
 
 # ── Quick smoke-test ─────────────────────────────────────────────────────────

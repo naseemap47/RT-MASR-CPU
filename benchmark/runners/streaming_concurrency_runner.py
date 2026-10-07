@@ -222,6 +222,16 @@ class StreamingConcurrencyRunner:
             return t0 + samples / SAMPLE_RATE / self.pace
 
         session = LiveCallSession(sample_rate=SAMPLE_RATE)
+        try:
+            try:
+                from src.core.observe import bound as _obs_bound
+            except ImportError:
+                from core.observe import bound as _obs_bound
+            _leg_obs = _obs_bound(leg=leg, audio_file=os.path.basename(path))
+        except ImportError:
+            from contextlib import nullcontext
+            _leg_obs = nullcontext()
+        _leg_obs.__enter__()
         session.mark_call_start()
 
         def record(t_start: float, t_end: float, window_s: float, newest: int) -> None:
@@ -350,6 +360,14 @@ class StreamingConcurrencyRunner:
             and res.p95_staleness_s <= self.lag_threshold_s
             and res.end_lag_s <= self.lag_threshold_s
         )
+        session.mark_call_end(outputs={
+            "text": res.final_text, "kept_up": res.kept_up, "passes": res.passes,
+            "aborted": res.aborted, "errors": res.errors,
+        })
+        try:
+            _leg_obs.__exit__(None, None, None)
+        except Exception:
+            pass
         return res
 
     # ── one concurrency level ─────────────────────────────────────────────

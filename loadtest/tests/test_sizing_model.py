@@ -57,15 +57,15 @@ def test_usl_fit_recovers_known_parameters_and_never_goes_negative():
     assert fit_usl([(4, 1.0)]) is None and fit_usl([(4, 0.0), (8, 0.0)]) is None
 
 
-def test_choose_reference_prefers_legs_per_vcpu_and_ignores_coarse_one_leg_shapes():
-    a = _sc(vcpus=16, l_sat=4)                                    # 0.25 / vCPU
-    b = _sc(vcpus=8, l_sat=3, base=2500.0)                        # 0.375 / vCPU  <- best
+def test_choose_reference_prefers_legs_per_thread_and_ignores_coarse_one_leg_shapes():
+    a = _sc(vcpus=16, l_sat=4)                                    # 0.25 / thread
+    b = _sc(vcpus=8, l_sat=3, base=2500.0)                        # 0.375 / thread  <- best
     c = _sc(vcpus=4, l_sat=1)                                     # 0.25 but only 1 leg: ranked last
     ref, why = choose_reference([a, b, c])
-    assert ref is b and "per vCPU" in why
+    assert ref is b and "per CPU thread" in why
     assert choose_reference([_sc(l_sat=0), _sc(status="infeasible_memory", l_sat=0)])[0] is None
-    only_one, _ = choose_reference([_sc(vcpus=8, l_sat=1)])
-    assert only_one.l_sat == 1
+    only_one, why_one = choose_reference([_sc(vcpus=8, l_sat=1)])
+    assert only_one.l_sat == 1 and "this machine" in why_one
 
 
 # ── sizing arithmetic ─────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ def test_size_model_arithmetic_is_explicit_and_not_a_straight_multiple():
     assert r100.total_vcpus == 40 * 16
     assert (r1000.nodes_base, r1000.spare_nodes, r1000.nodes) == (358, 36, 394)
     assert r100.basis == "EXTRAPOLATED"
-    # capacity is NOT legs x (vcpu / saturation legs): headroom + spares always cost more than that
+    # capacity is NOT legs x (threads / saturation legs): headroom + spares always cost more than that
     naive_nodes = 1000 / 4
     assert r1000.nodes > naive_nodes
     assert r100.nodes_low < r100.nodes < r100.nodes_high            # +-1 leg range brackets the central estimate
@@ -113,12 +113,12 @@ def test_confidence_falls_with_extrapolation_ratio():
     assert low.rows[0].confidence == "Low-Medium"                   # 1-2 leg resolution lowers it a notch
 
 
-def test_ram_is_weights_per_process_plus_per_leg_increment_rounded_to_node_sizes():
+def test_ram_is_weights_per_process_plus_per_leg_increment_ceiled_to_whole_gb():
     one = size_model([_sc(l_sat=4, procs=1, base=3000.0)], SizingAssumptions(targets=(50,)))
     two = size_model([_sc(l_sat=4, procs=2, base=6000.0)], SizingAssumptions(targets=(50,)))
     assert two.ram_detail["weights_and_buffers_mb"] == 2 * one.ram_detail["weights_and_buffers_mb"]
     assert two.node_ram_gb >= one.node_ram_gb
-    assert one.node_ram_gb in SizingAssumptions().node_ram_options_gb
+    assert one.node_ram_gb == math.ceil(one.ram_detail["need_gb"] - 1e-9)
     assert one.ram_detail["need_gb"] > one.ram_detail["node_rss_mb"] / 1024            # headroom + OS added
 
 
@@ -169,10 +169,11 @@ def test_load_raw_files_merges_and_reads_infeasible_scenarios(tmp_path):
 def test_rendered_guide_uses_the_requested_table_and_separates_measured_from_extrapolated():
     scs = load_scenarios(_raw(l_sat=3))
     text, data = render_sizing_guide(scs, _raw()["hardware"], SizingAssumptions(targets=(2, 50, 60, 100, 500, 1000)))
-    assert "| Concurrent legs | Estimated vCPU | RAM | Nodes | Target RTF | Target P95 latency | Basis |" in text
+    assert "| Concurrent legs | Edge boxes | CPU threads / box | RAM / box | Target RTF | Target P95 latency | Basis |" in text
     for n in ("50", "60", "100", "500", "1,000"):
         assert f"| {n} |" in text
-    assert "MEASURED: fits on one measured" in text and "EXTRAPOLATED:" in text
+    assert "MEASURED: fits on one measured edge box" in text and "EXTRAPOLATED:" in text
+    assert "Estimated vCPU" not in text and "instance type" not in text and "2 GB per" not in text
     for heading in ("Measured results", "Model and assumptions", "Sensitivity", "Confidence and limitations"):
         assert heading in text
     assert "infeasible_memory" in text                                  # skipped layout is still reported
@@ -183,7 +184,7 @@ def test_sizing_table_rows_follow_the_model():
     ms = size_model(load_scenarios(_raw()), SizingAssumptions(targets=(100,)))
     table = sizing_table(ms, SizingAssumptions(targets=(100,)))
     row = table.splitlines()[-1]
-    assert row.startswith("| 100 |") and f"{ms.rows[0].nodes:,}" in row and f"{ms.rows[0].total_vcpus:,}" in row
+    assert row.startswith("| 100 |") and f"{ms.rows[0].nodes:,}" in row and str(ms.rows[0].node_vcpus) in row
 
 
 def test_guide_handles_a_model_that_never_sustains_a_leg():

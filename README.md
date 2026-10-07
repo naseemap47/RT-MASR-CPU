@@ -415,20 +415,21 @@ throughput column is from the older batch-mode concurrency test):
 
 ## Run the load test and capacity sizing
 
-The load test answers *how many simultaneous live calls can one CPU node carry, and what does that mean for
-50-1,000 legs?* It runs many independent real-time call legs (one leg = one audio source streamed at real-time
-pace through the live server's stream logic) on pinned worker processes, ramps the number of legs until the
-machine saturates, and writes the measured data. A separate step turns it into a sizing guide.
+The load test answers *how many simultaneous live calls can one edge CPU carry, and how many identical boxes
+are needed for 50-1,000 legs?* It runs many independent real-time call legs (one leg = one audio source streamed at
+real-time pace through the live server's stream logic) on pinned worker processes, ramps the number of legs until the
+machine saturates, and writes the measured data. A separate step turns it into a sizing guide for more of the same
+edge boxes. It does not size cloud instance fleets.
 
 ```bash
-# Show the scenarios (model x load profile x vCPUs x processes)
+# Show the runs (model x load profile on this whole machine)
 uv run python loadtest/run_loadtest.py --list
 
-# Full run (about 1 h; keep the machine otherwise idle)
+# Full run (keep the machine otherwise idle)
 uv run python loadtest/run_loadtest.py
 
 # Narrower runs
-uv run python loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny --vcpus 8,16 --processes 1,2
+uv run python loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny
 uv run python loadtest/run_loadtest.py --levels 1,2 --duration 15        # smoke run
 
 # Build the sizing guide from one or more raw results (every assumption is a flag)
@@ -445,14 +446,13 @@ uv run python loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --le
 - **Memory safety:** workers start one at a time against free RAM, and levels that would not fit are skipped
   (reserve and floor in `loadtest/configs/loadtest_config.yaml`).
 
-Result on the development laptop (8 cores / 16 threads): one node saturates at only **1-3 legs**
-(Whisper tiny INT8: 2 conversational legs on 8 vCPU, 3 with two 8-thread processes on 16 vCPU; Qwen3-0.6B INT8:
-1 leg on 4 vCPU and no gain from more cores). The guide therefore scales **out** with 4-8 vCPU nodes, and every
-50+ leg row is extrapolated and labelled with its confidence. For example, 100 conversational legs is about
-87 Whisper-tiny nodes of 8 vCPU or 110 Qwen3 nodes of 4 vCPU, including 10% spares. See
+Result on the development laptop (8 cores / 16 threads): one box saturates at only **1-2 legs** with the default
+layout (Whisper tiny INT8: 2 conversational legs; Qwen3-0.6B INT8: 1). Extra legs need extra boxes. Every 50+ leg row
+is extrapolated and labelled with its confidence. For example, 100 conversational legs is about 87 Whisper-tiny boxes
+or 110 Qwen3 boxes, including 10% spares. See
 [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) for the full tables (50/60/100/200/500/1,000 legs),
 assumptions and limitations, and [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) for how the pipeline works.
-Re-run it on your target instance type before buying hardware.
+Re-run it on the target edge CPU before buying hardware.
 
 ---
 
@@ -498,5 +498,5 @@ uv run pytest                                   # all of tests/ (needs models + 
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
 | [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |
-| [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | CPU sizing for 50-1,000 concurrent legs (measured vs extrapolated) |
+| [`docs/loadtest/sizing_guide.md`](docs/loadtest/sizing_guide.md) | Edge-CPU sizing for 50-1,000 concurrent legs (identical boxes; measured vs extrapolated) |
 | [`docs/deployment.md`](docs/deployment.md) | Production design: telephony ingestion, VAD / long speech / interruptions / jitter, headroom, failure mode, node counts |

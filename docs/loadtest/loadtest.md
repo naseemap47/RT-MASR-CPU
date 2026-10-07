@@ -1,8 +1,11 @@
 # Load Test & Capacity Sizing
 
-The load-test pipeline (`loadtest/`) answers: *how many simultaneous live calls can one CPU node carry, where does it
-saturate, and what does that mean for 50-1,000 legs?* It mirrors the benchmark pipeline (config YAML -> runner -> raw JSON +
-Markdown) and reuses its engines, stream logic and config.
+The load-test pipeline (`loadtest/`) answers: *how many simultaneous live calls can one edge CPU carry, where does it
+saturate, and what does that mean if you need 50-1,000 legs on more identical boxes?* It mirrors the benchmark pipeline
+(config YAML -> runner -> raw JSON + Markdown) and reuses its engines, stream logic and config.
+
+This project deploys on **edge CPUs**. The pipeline pins threads of the machine under test; it does not model cloud
+instance types.
 
 ```
 loadtest_config.yaml ──> run_loadtest.py ──> <UTC>_loadtest_raw.json / _summary.md      (MEASURED)
@@ -44,13 +47,11 @@ Resources per level (`TreeSampler`): utilisation of the pinned CPUs, CPU-seconds
 Caution: ONNX Runtime threads spin-wait, so CPU time overstates useful work and per-leg CPU cost is **not** constant. The sizing is therefore driven
 from the measured saturation point, not from CPU-seconds per leg.
 
-## Scenarios (node shapes)
+## What is run
 
-A scenario = model x profile x **vCPUs** x **processes**. vCPUs are taken as hardware-thread sibling pairs, as a cloud VM would be.
-Each process is pinned (`sched_setaffinity`) to its share of CPUs with that many ORT threads, so scenarios stand in for instance sizes:
-
-- **core sweep** (1 process): how capacity scales with cores (thread contention, diminishing returns).
-- **process sweep** (at the top vCPU count): weights are shared inside a process but duplicated across processes; trades memory for isolation.
+Each **model × load profile** is one run: pin **all logical CPUs** of this machine, **one process**, ramp the number of
+legs until they no longer keep up. That saturation point is the measurement. Thread pinning uses sibling pairs (both SMT
+threads of a physical core). `--cpus N` / `--processes P` can shrink a smoke run; they do not build a matrix of layouts.
 
 ## Safety on a shared machine
 
@@ -60,9 +61,9 @@ workers if free RAM falls below `safety.hard_floor_mb`, and the ramp predicts RA
 ## Running
 
 ```bash
-python3 loadtest/run_loadtest.py --list                          # show scenarios
-python3 loadtest/run_loadtest.py                                  # everything in loadtest_config.yaml (about 1 h)
-python3 loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny --vcpus 8,16 --processes 1,2
+python3 loadtest/run_loadtest.py --list                          # show runs
+python3 loadtest/run_loadtest.py                                  # every model x profile in loadtest_config.yaml
+python3 loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny
 python3 loadtest/run_loadtest.py --levels 1,2 --duration 15      # smoke run
 python3 loadtest/run_sizing.py --input <dense_raw.json> <conv_raw.json>
 python3 loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fraction 0.2 --legs 50,100,1000
@@ -73,21 +74,21 @@ results are only as clean as the machine.
 
 ## Sizing model
 
-Built from the measured saturation point of each node shape (never `legs x per-leg cost`):
+Built from the measured saturation point of each layout (never `legs x per-leg cost`):
 
 ```
-legs/node = max(1, l_sat x headroom(0.70) / serving_overhead(1.10))
-nodes     = ceil(N / legs/node) + max(1, ceil(10% x nodes))        # N+k spares
-RAM/node  = roundup((processes x weights + legs x MB_per_leg) x 1.2 + 2 GB OS), at least 2 GB/vCPU
+legs/box = max(1, l_sat x headroom(0.70) / serving_overhead(1.10))
+boxes    = ceil(N / legs/box) + max(1, ceil(10% x boxes))        # spare edge boxes
+RAM/box  = ceil((processes x weights + legs x MB_per_leg) x 1.2 + 2 GB OS)   # whole GB
 ```
 
 | Factor | Treatment |
 |---|---|
 | Shared model memory | measured base RSS per layout; one copy per process |
 | Per-leg memory | regression over healthy levels |
-| Thread contention / diminishing throughput | core sweep + Universal Scalability Law fit; the guide scales **out** rather than assuming bigger nodes |
+| Thread contention / diminishing throughput | measured as this machine's saturation (one process, all threads); extra legs need extra boxes |
 | Queueing | headroom below the knee (latency-vs-load table shows the knee) |
-| Process / NUMA strategy | process sweep measured; NUMA assumed (test machine is one socket) |
+| Process / NUMA | one process on this one-socket machine; extra processes / extra sockets not swept |
 | Batching | **not credited**: engines decode one stream per pass |
 | Confidence | falls with N / `l_sat`: <=10x Medium, <=50x Low-Medium, <=200x Low, beyond Very low |
 
@@ -102,5 +103,5 @@ uv run --offline python -m pytest loadtest/tests benchmark/tests -q
 
 ## Limitations (short)
 
-One laptop CPU (not a server part), noisy shared machine, 1-leg resolution, clean read-speech only, no network path, scale-out beyond one node
+One laptop-class edge CPU, noisy shared machine, 1-leg resolution, clean read-speech only, no network path, scale-out beyond one box
 assumed rather than measured, 30 s calls. See section 6 of the sizing guide.

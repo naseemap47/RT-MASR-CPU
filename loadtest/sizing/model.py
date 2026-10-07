@@ -11,19 +11,19 @@ Every number the model produces is one of
 It deliberately does NOT compute ``legs x per-leg cost``. Cost per leg is not constant: inference
 threads spin-wait, so CPU time per leg *falls* as load rises, while latency collapses suddenly at
 saturation. The model therefore sizes from the measured *saturation point* (the highest number of
-simultaneous legs that all keep up) and then applies, explicitly and separately:
+simultaneous legs that all keep up) on this edge CPU and then applies, explicitly and separately:
 
-  headroom        run each node at a fraction of its measured saturation point (queueing: waiting
+  headroom        run each box at a fraction of its measured saturation point (queueing: waiting
                   time diverges as utilisation -> 1, so p95 latency is protected by staying off
                   the knee)
   serving layer   WebSocket / JSON / resampling overhead that the in-process test does not include
-  spare nodes     N+k so a node failure or rolling restart does not push the rest past the knee
+  spare boxes     N+k so a box failure or restart does not push the rest past the knee
   memory          weights are shared by all legs in one process (fixed cost per process, measured)
-                  plus a per-leg increment (regression on measured levels)
-  scale-up        diminishing returns with more vCPUs per node, from a Universal Scalability Law fit
-                  to the measured core sweep (used only to *describe* the curve and to flag why
-                  bigger nodes are not assumed to be proportionally better)
-  scale-out       independent nodes (calls are sticky, nothing is shared between nodes): the one
+                  plus a per-leg increment (regression on measured levels); RAM is the GB this box
+                  actually needs
+  scale-up        diminishing returns with more pinned threads on this chip, from the measured core
+                  sweep (used only to *describe* the curve; larger unmeasured CPUs are not predicted)
+  scale-out       independent identical edge boxes (calls are sticky, nothing is shared): the one
                   place where capacity is taken as additive; its confidence falls with the
                   extrapolation ratio
 """
@@ -43,23 +43,21 @@ import numpy as np
 @dataclass
 class SizingAssumptions:
     """Inputs that are NOT measured. Change them here; every table is recomputed."""
-    headroom: float = 0.70               # fraction of the measured saturation point nodes are run at
-    spare_fraction: float = 0.10         # N+k spare nodes as a fraction of the nodes needed ...
+    headroom: float = 0.70               # fraction of the measured saturation point each edge box is run at
+    spare_fraction: float = 0.10         # N+k spare boxes as a fraction of the boxes needed ...
     min_spare_nodes: int = 1             # ... but at least this many
     serving_overhead: float = 1.10       # extra CPU for WebSocket/JSON/ack handling (UNMEASURED)
-    os_reserve_gb: float = 2.0           # OS + monitoring + serving process, per node
+    os_reserve_gb: float = 2.0           # OS + monitoring + serving process, per box
     ram_headroom: float = 1.20           # allocator fragmentation, page cache, bursts
-    node_ram_options_gb: tuple = (4, 8, 16, 32, 64, 96, 128, 192, 256, 384, 512)
-    min_ram_per_vcpu_gb: float = 2.0     # smallest RAM:vCPU ratio cloud compute instances are sold with (ASSUMED)
     targets: tuple = (50, 60, 100, 200, 500, 1000)
-    min_scale_out_legs: int = 1          # a node always hosts at least one leg
+    min_scale_out_legs: int = 1          # a box always hosts at least one leg
 
 
 # ── reading measurements ──────────────────────────────────────────────────────
 
 @dataclass
 class Scenario:
-    """One measured (model, vCPUs, processes) saturation search."""
+    """One measured (model, pinned CPU threads, processes) saturation search."""
     model_id: str
     display_name: str
     stream_mode: str
@@ -85,7 +83,7 @@ class Scenario:
 
     @property
     def label(self) -> str:
-        return f"{self.vcpus} vCPU, {self.processes}x{self.threads}"
+        return f"{self.vcpus} CPU threads, {self.processes}x{self.threads}"
 
 
 def _level_record(lv: dict) -> dict:
@@ -123,7 +121,7 @@ def load_scenarios(raw: dict) -> list[Scenario]:
 
 
 def load_raw_files(paths: list[str | Path]) -> tuple[list[Scenario], dict]:
-    """Merge several raw load-test JSON files (later files win for the same model/vCPU/process key)."""
+    """Merge several raw load-test JSON files (later files win for the same model/CPU-threads/process key)."""
     merged: dict[tuple, Scenario] = {}
     hardware: dict = {}
     for p in paths:
@@ -156,7 +154,7 @@ def memory_fit(sc: Scenario) -> dict:
 def fit_usl(points: list[tuple[float, float]]) -> Optional[dict]:
     """
     Universal Scalability Law  C(v) = lam * v / (1 + sigma*(v-1) + kappa*v*(v-1))
-    fitted to (vCPUs, saturation legs) points by linear least squares on v/C:
+    fitted to (pinned CPU threads, saturation legs) points by linear least squares on v/C:
 
         v/C = a + b*(v-1) + c*v*(v-1),   a = 1/lam, b = sigma/lam, c = kappa/lam   (b, c >= 0)
 
@@ -215,9 +213,9 @@ class SizingRow:
     nodes: int
     nodes_low: int                       # optimistic: saturation point 1 leg higher
     nodes_high: int                      # pessimistic: saturation point 1 leg lower
-    node_vcpus: int
-    total_vcpus: int
-    node_ram_gb: float
+    node_vcpus: int                      # logical CPUs pinned on one edge box
+    total_vcpus: int                     # boxes x pinned threads (kept for JSON; not shown as a fleet metric)
+    node_ram_gb: float                   # GB this box needs (ceil of measured need)
     total_ram_gb: float
     legs_per_node: float
     target_rtf: float
@@ -238,26 +236,27 @@ class ModelSizing:
     op_level: Optional[dict]             # measured level closest to the operating point
     node_ram_gb: float
     ram_detail: dict
-    usl: Optional[dict]
-    usl_extrapolation: dict              # {vcpus: predicted saturation legs}
+    usl: Optional[dict]                  # fit on measured core-sweep points only; not used to predict other CPUs
     rows: list[SizingRow] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
 
 def choose_reference(scenarios: list[Scenario]) -> tuple[Optional[Scenario], str]:
     """
-    Pick the node shape (vCPUs, process layout) to build the sizing on: best measured
-    saturation legs per vCPU among shapes that sustain >= 2 legs (a 1-leg result is too coarse
-    to rank); ties broken by lower RAM, then fewer processes.
+    Pick the layout to size from. A default load-test run has one layout (this whole machine).
+    If older result files still contain several pin-widths, the best legs-per-thread among shapes
+    that sustain >= 2 legs is used (a 1-leg result is too coarse to rank).
     """
     ok = [s for s in scenarios if s.status == "ok" and s.l_sat >= 1 and s.confirmed]
     if not ok:
         ok = [s for s in scenarios if s.status == "ok" and s.l_sat >= 1]
     if not ok:
         return None, "no scenario sustained even one leg"
+    if len(ok) == 1:
+        return ok[0], "the measured layout on this machine"
     pool = [s for s in ok if s.l_sat >= 2] or ok
     best = max(pool, key=lambda s: (round(s.l_sat / s.vcpus, 6), -s.base_rss_mb, -s.processes, s.vcpus))
-    reason = (f"highest measured saturation legs per vCPU ({best.l_sat}/{best.vcpus} = "
+    reason = (f"highest measured saturation legs per CPU thread ({best.l_sat}/{best.vcpus} = "
               f"{best.l_sat / best.vcpus:.3f}) among shapes sustaining >=2 legs"
               if best.l_sat >= 2 else "only shape that sustained a leg")
     return best, reason
@@ -289,11 +288,11 @@ def size_model(scenarios: list[Scenario], a: SizingAssumptions) -> Optional[Mode
     ref, reason = choose_reference(scenarios)
     first = scenarios[0]
     if ref is None:
-        return ModelSizing(first.model_id, first.display_name, first.profile, first, reason, 0.0, None, 0.0, {}, None, {},
+        return ModelSizing(first.model_id, first.display_name, first.profile, first, reason, 0.0, None, 0.0, {}, None,
                            notes=["No measured configuration sustained a single leg within the SLO: no sizing."])
 
     def cap_for(l_sat: float) -> float:
-        # headroom + serving overhead applied to the saturation point; never below 1 leg per node
+        # headroom + serving overhead applied to the saturation point; never below 1 leg per box
         return max(float(a.min_scale_out_legs), l_sat * a.headroom / a.serving_overhead)
 
     cap = cap_for(ref.l_sat)
@@ -306,21 +305,19 @@ def size_model(scenarios: list[Scenario], a: SizingAssumptions) -> Optional[Mode
     slope = mem["slope_mb_per_leg"] if mem["slope_mb_per_leg"] is not None else 0.0
     per_node_mb = ref.base_rss_mb + slope * math.ceil(cap)
     need_gb = (per_node_mb / 1024.0) * a.ram_headroom + a.os_reserve_gb
-    sold_gb = max(need_gb, a.min_ram_per_vcpu_gb * ref.vcpus)     # can't buy a node with less than the standard RAM:vCPU ratio
-    node_ram = next((g for g in a.node_ram_options_gb if g >= sold_gb), _ceil_to(sold_gb, 64))
+    node_ram = float(math.ceil(need_gb - 1e-9))                  # whole GB this edge box needs
     ram_detail = {"weights_and_buffers_mb": ref.base_rss_mb, "per_leg_mb": slope,
                   "legs_on_node": math.ceil(cap), "node_rss_mb": per_node_mb, "need_gb": need_gb,
                   "fit": mem}
 
     sweep = [(s.vcpus, s.l_sat) for s in scenarios if s.processes == 1 and s.status == "ok"]
     usl = fit_usl(sweep)
-    usl_x = {v: usl_capacity(usl, v) for v in (8, 16, 32, 64, 128)} if usl else {}
 
     target_rtf = _ceil_to(op["pass_rtf_p95"], 0.05) if op else float("nan")
     target_p95 = _ceil_to(op["stale_p95"], 0.1) if op else float("nan")
 
     ms = ModelSizing(first.model_id, first.display_name, first.profile, ref, reason, cap, op, float(node_ram),
-                     ram_detail, usl, usl_x)
+                     ram_detail, usl)
     for n in a.targets:
         base, spare, total = _nodes(n, cap, a)
         _, _, total_hi = _nodes(n, cap_hi, a)
@@ -338,7 +335,7 @@ def size_model(scenarios: list[Scenario], a: SizingAssumptions) -> Optional[Mode
             confidence=_confidence(ratio, ref), extrapolation_ratio=ratio,
         ))
     if cap <= a.min_scale_out_legs + 1e-9:
-        ms.notes.append("Headroom could not be applied: a node barely sustains one leg, so each node hosts a single leg "
+        ms.notes.append("Headroom could not be applied: a box barely sustains one leg, so each box hosts a single leg "
                         "and capacity is not additive in a meaningful way below that.")
     return ms
 

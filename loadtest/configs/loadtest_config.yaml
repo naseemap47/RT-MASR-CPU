@@ -48,18 +48,9 @@ safety:
   hard_floor_mb: 600        # workers are killed if free RAM drops below this mid-level
   assumed_mb_per_leg: 250   # per-leg RSS growth assumed until two levels have been measured
 
-# Scenarios per model.
-#   core_sweep    : node sizes (vCPUs) to test with ONE process using all of them
-#                   -> how capacity scales with cores (thread contention, diminishing returns)
-#   process_sweep : at the largest vCPU count, split into this many pinned processes
-#                   -> process strategy (memory duplication vs contention)
-#   A vCPU is one hardware thread; vCPUs are taken in sibling pairs (as a cloud VM would get them).
+# Models to load-test. Each model is ramped on this whole machine (all logical CPUs, one process).
 models:
   - id: "qwen3_onnx_int8_0.6b"
-    core_sweep: [4, 8, 16]
-    process_sweep: [2]
   - id: "whisper_int8_tiny"
-    core_sweep: [4, 8, 16]
-    process_sweep: [2, 4]
 
 output_dir: "loadtest/results"

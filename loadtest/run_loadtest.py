@@ -6,9 +6,9 @@ ASR CPU Load Test: simulate many independent real-time call legs, find the satur
 Usage:
     python3 loadtest/run_loadtest.py                                   # everything in loadtest_config.yaml
     python3 loadtest/run_loadtest.py --models whisper_int8_tiny
-    python3 loadtest/run_loadtest.py --vcpus 8,16 --processes 1,2      # override the scenario sweeps
+    python3 loadtest/run_loadtest.py --cpus 8                          # pin 8 threads instead of the whole machine
     python3 loadtest/run_loadtest.py --levels 1,2,4 --duration 15      # quick smoke run
-    python3 loadtest/run_loadtest.py --list                            # show the scenarios and exit
+    python3 loadtest/run_loadtest.py --list                            # show the runs and exit
 
 Then turn the measured data into a deployment sizing guide:
     python3 loadtest/run_sizing.py
@@ -44,15 +44,17 @@ def parse_args() -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="loadtest/configs/loadtest_config.yaml")
     p.add_argument("--models", default=None, help="Comma-separated config ids (default: all in the load-test config)")
-    p.add_argument("--vcpus", default=None, help="Override core_sweep, e.g. 8,16")
-    p.add_argument("--processes", default=None, help="Override process_sweep (at the largest vCPU count), e.g. 1,2")
+    p.add_argument("--cpus", "--vcpus", dest="cpus", type=int, default=None,
+                   help="Logical CPUs to pin (default: all on this machine)")
+    p.add_argument("--processes", type=int, default=1,
+                   help="Worker processes sharing those CPUs (default: 1)")
     p.add_argument("--levels", default=None, help="Override ramp.levels, e.g. 1,2,4,8")
     p.add_argument("--profiles", default=None, help="Comma-separated load profiles from the config (default: all), e.g. conversational")
     p.add_argument("--duration", type=float, default=None, help="Override call.duration_s")
     p.add_argument("--no-refine", action="store_true", help="Skip bisecting between last healthy / first failing level")
     p.add_argument("--no-confirm", action="store_true", help="Skip re-running the saturation point to confirm it")
     p.add_argument("--output-dir", default=None)
-    p.add_argument("--list", action="store_true", help="Print the scenario matrix and exit")
+    p.add_argument("--list", action="store_true", help="Print the runs and exit")
     return p.parse_args()
 
 
@@ -60,38 +62,19 @@ def _ints(text: str | None) -> list[int] | None:
     return [int(x) for x in text.split(",") if x.strip()] if text else None
 
 
-def expand_scenarios(cfg: dict, max_vcpus: int, models: list[str] | None,
-                     vcpus_override: list[int] | None, procs_override: list[int] | None,
-                     profiles: list[str] | None = None) -> list[dict]:
-    """Scenario matrix: per load profile, per model: the core sweep (1 process) then the process sweep at the top vCPU count."""
+def expand_scenarios(cfg: dict, n_cpus: int, models: list[str] | None,
+                     processes: int = 1, profiles: list[str] | None = None) -> list[dict]:
+    """One run per (profile, model) on this machine: ``n_cpus`` threads, ``processes`` workers."""
+    if n_cpus < 1 or processes < 1:
+        return []
     out: list[dict] = []
     for prof in (profiles or list(cfg["profiles"])):
-        out += _expand_one_profile(cfg, max_vcpus, models, vcpus_override, procs_override, prof)
+        for m in cfg.get("models", []):
+            mid = m["id"] if isinstance(m, dict) else m
+            if models and mid not in models:
+                continue
+            out.append({"model_id": mid, "profile": prof, "vcpus": n_cpus, "processes": processes})
     return out
-
-
-def _expand_one_profile(cfg: dict, max_vcpus: int, models: list[str] | None,
-                        vcpus_override: list[int] | None, procs_override: list[int] | None, profile: str) -> list[dict]:
-    out: list[dict] = []
-    for m in cfg.get("models", []):
-        if models and m["id"] not in models:
-            continue
-        sweep = sorted({v for v in (vcpus_override or m.get("core_sweep", [max_vcpus])) if 0 < v <= max_vcpus})
-        if not sweep:
-            continue
-        top = sweep[-1]
-        for v in sweep:
-            out.append({"model_id": m["id"], "profile": profile, "vcpus": v, "processes": 1})
-        for p in (procs_override if procs_override is not None else m.get("process_sweep", [])):
-            if p > 1 and top // p >= 1:
-                out.append({"model_id": m["id"], "profile": profile, "vcpus": top, "processes": p})
-    seen, uniq = set(), []
-    for sc in out:
-        key = (sc["profile"], sc["model_id"], sc["vcpus"], sc["processes"])
-        if key not in seen:
-            seen.add(key)
-            uniq.append(sc)
-    return uniq
 
 
 def speech_fraction(audio: list[str], gap_s: float) -> float | None:
@@ -136,7 +119,7 @@ def run_scenario(entry: dict, sc: dict, cfg: dict, call_audio: list[str], ramp_l
         "vcpus": sc["vcpus"], "processes": sc["processes"], "threads_per_process": threads,
         "cpus": cpus, "status": "ok", "error": "", "ready": [], "base_rss_mb": 0.0, "load_s": 0.0, "ramp": None,
     }
-    print(f"\n{'=' * 78}\n  {entry['id']} [{prof_name}, gap {gap_s:g}s]: {sc['vcpus']} vCPU, {sc['processes']} process(es) x {threads} threads "
+    print(f"\n{'=' * 78}\n  {entry['id']} [{prof_name}, gap {gap_s:g}s]: {sc['vcpus']} CPU threads, {sc['processes']} process(es) x {threads} threads "
           f"(CPUs {cpus[0]}-{cpus[-1]})\n{'=' * 78}")
 
     pool = WorkerPool(entry, groups, runner_cfg,
@@ -190,18 +173,24 @@ def main() -> None:
     if unknown:
         sys.exit(f"Unknown config id(s): {unknown}. Available: {sorted(entries)}")
 
-    max_vcpus = len(available_cpus())
+    n_cpus = len(available_cpus())
+    if args.cpus is not None:
+        if args.cpus < 1 or args.cpus > n_cpus:
+            sys.exit(f"--cpus {args.cpus} is outside 1..{n_cpus} on this machine")
+        n_cpus = args.cpus
+    if args.processes < 1 or args.processes > n_cpus:
+        sys.exit(f"--processes {args.processes} must be between 1 and {n_cpus}")
     profiles = [x.strip() for x in args.profiles.split(",")] if args.profiles else None
     bad_prof = [x for x in (profiles or []) if x not in cfg["profiles"]]
     if bad_prof:
         sys.exit(f"Unknown profile(s): {bad_prof}. Available: {sorted(cfg['profiles'])}")
-    scenarios = expand_scenarios(cfg, max_vcpus, models, _ints(args.vcpus), _ints(args.processes), profiles)
+    scenarios = expand_scenarios(cfg, n_cpus, models, args.processes, profiles)
     if not scenarios:
-        sys.exit("No scenarios selected. Check --models / --vcpus and the load-test config.")
+        sys.exit("No runs selected. Check --models and the load-test config.")
 
     if args.list:
         for sc in scenarios:
-            print(f"{sc['profile']:<15} {sc['model_id']:<28} {sc['vcpus']:>3} vCPU  {sc['processes']} process(es)")
+            print(f"{sc['profile']:<15} {sc['model_id']:<28} {sc['vcpus']:>3} CPU threads  {sc['processes']} process(es)")
         return
 
     call_audio = [a for a in cfg["call"]["audio"] if os.path.exists(a)]

@@ -47,21 +47,25 @@ def sizing_table(ms: ModelSizing, a: SizingAssumptions) -> str:
     rows = []
     for r in ms.rows:
         if r.basis == "MEASURED":
-            basis = f"MEASURED: fits on one measured {r.node_vcpus} vCPU node (max {ms.reference.l_sat} legs)"
+            basis = f"MEASURED: fits on one measured edge box ({r.node_vcpus} CPU threads, max {ms.reference.l_sat} legs)"
         else:
-            basis = (f"EXTRAPOLATED: {r.legs_per_node:.2f} legs/node = {a.headroom:.0%} of measured max "
+            basis = (f"EXTRAPOLATED: {r.legs_per_node:.2f} legs/box = {a.headroom:.0%} of measured max "
                      f"{ms.reference.l_sat} / {a.serving_overhead:.2f} overhead; {r.nodes_base}+{r.spare_nodes} spare "
-                     f"nodes; confidence {r.confidence}")
+                     f"boxes; confidence {r.confidence}")
         rows.append([
             f"{r.legs:,}",
-            f"{r.total_vcpus:,}",
-            f"{_gb(r.total_ram_gb)} ({r.node_ram_gb:.0f} GB/node)",
             f"{r.nodes:,} ({r.nodes_low:,}-{r.nodes_high:,})",
+            str(r.node_vcpus),
+            _gb(r.node_ram_gb),
             f"<= {_f(r.target_rtf, 2)}",
             f"<= {_f(r.target_p95_s, 1)} s",
             basis,
         ])
-    return _table(["Concurrent legs", "Estimated vCPU", "RAM", "Nodes", "Target RTF", "Target P95 latency", "Basis"], rows)
+    return _table(
+        ["Concurrent legs", "Edge boxes", "CPU threads / box", "RAM / box",
+         "Target RTF", "Target P95 latency", "Basis"],
+        rows,
+    )
 
 
 def _scenario_rows(scs: list[Scenario]) -> list[list[str]]:
@@ -108,8 +112,8 @@ Every number is tagged by where it comes from:
 | **ASSUMED** | an input the load test cannot measure; listed in section 4 and editable in `SizingAssumptions` |
 | **EXTRAPOLATED** | a prediction beyond the measured range. **Every row for 50+ legs below is extrapolated**: the test machine saturates at a handful of legs |
 
-Nothing here is `legs x per-leg cost`. Sizes are built from the measured *saturation point* of a node, then adjusted
-for headroom, serving overhead, spares, memory and scale-up limits (section 4).
+Nothing here is `legs x per-leg cost`. Sizes are built from the measured *saturation point* of this edge CPU, then adjusted
+for headroom, serving overhead, spare boxes, and memory (section 4). Unmeasured larger chips are not predicted.
 
 Two **load profiles** were measured because speech density changes the cost of a leg a lot: *conversational* (about half the
 call is silence, which skips inference) and *dense* (almost continuous speech, a stress case). Read the conversational
@@ -117,13 +121,15 @@ table as the planning case and the dense table as the upper bound.
 """)
 
     # ── tables ────────────────────────────────────────────────────────────
-    L.append("## 2. Sizing tables (CPU only)\n")
-    L.append("> **Estimated vCPU** and **RAM** are fleet totals including spare nodes. **Nodes** is the central estimate with "
-             "the range from the measured saturation point being one leg higher (low) or lower (high) in parentheses. "
+    L.append("## 2. Sizing tables (edge CPU)\n")
+    L.append("> **Edge boxes** is how many identical machines of the measured pin-width are needed (central estimate, with "
+             "the range if saturation is one leg higher or lower in parentheses), including spare boxes. "
+             "**CPU threads / box** is how many logical CPUs that layout pins. **RAM / box** is the GB this box needs "
+             "(measured weights + per-leg RSS, with RAM headroom and OS reserve, rounded up to a whole GB). "
              "**Target RTF** = P95 real-time factor of one inference pass at the operating point; **Target P95 latency** = "
              "P95 *staleness* (how far the live transcript trails the speaker, queueing included) at that point. Both "
-             "targets are the values *measured* at the operating load on the reference node; the capacity figures only "
-             "hold if the fleet is operated at or below that load.\n")
+             "targets are the values *measured* at the operating load on the reference layout; the capacity figures only "
+             "hold if each box is operated at or below that load.\n")
     for (model, profile), ms in _ordered(sized):
         ref = ms.reference
         scs = [s for s in scenarios if s.key == (model, profile)]
@@ -132,15 +138,15 @@ table as the planning case and the dense table as the upper bound.
             L.append("\n".join(f"- {n}" for n in ms.notes) + "\n")
             continue
         L.append(f"**Load profile:** speech about {_speech(scs)} of each call. "
-                 f"**Node shape:** {ref.vcpus} vCPU, {ref.processes} process(es) x {ref.threads} threads "
-                 f"({ms.reference_reason}). **Measured:** saturation at **{ref.l_sat} legs/node** "
+                 f"**Box layout:** {ref.vcpus} CPU threads, {ref.processes} process(es) x {ref.threads} threads "
+                 f"({ms.reference_reason}). **Measured:** saturation at **{ref.l_sat} legs/box** "
                  f"(first failing {ref.l_fail if ref.l_fail is not None else 'n/a'}, "
                  f"{'confirmed' if ref.confirmed else 'not re-confirmed'}). "
-                 f"**Planning capacity:** {ms.legs_per_node:.2f} legs/node (ASSUMED headroom {a.headroom:.0%}, serving "
-                 f"overhead x{a.serving_overhead:.2f}). **Node RAM:** {ms.node_ram_gb:.0f} GB "
+                 f"**Planning capacity:** {ms.legs_per_node:.2f} legs/box (ASSUMED headroom {a.headroom:.0%}, serving "
+                 f"overhead x{a.serving_overhead:.2f}). **RAM / box:** {ms.node_ram_gb:.0f} GB "
                  f"({ms.ram_detail['legs_on_node']} legs x {_f(ms.ram_detail['per_leg_mb'], 0)} MB/leg + "
                  f"{_f(ms.ram_detail['weights_and_buffers_mb'], 0)} MB model/buffers, x{a.ram_headroom:.2f} headroom "
-                 f"+ {a.os_reserve_gb:.0f} GB OS = {ms.ram_detail['need_gb']:.1f} GB; sold at no less than {a.min_ram_per_vcpu_gb:g} GB per vCPU and rounded up to a standard size).\n")
+                 f"+ {a.os_reserve_gb:.0f} GB OS = {ms.ram_detail['need_gb']:.1f} GB, rounded up).\n")
         L.append(sizing_table(ms, a) + "\n")
         for n in ms.notes:
             L.append(f"> {n}\n")
@@ -152,12 +158,12 @@ table as the planning case and the dense table as the upper bound.
                  f"{hardware.get('logical_cores', '?')} threads, {hardware.get('ram_gb', 0):.1f} GB RAM, one socket / one NUMA node, "
                  f"onnxruntime {hardware.get('lib_versions', {}).get('onnxruntime', '?')}.\n")
     L.append("### 3.1 Saturation point per scenario (MEASURED)\n")
-    L.append("> A scenario is one node shape: N vCPUs (hardware-thread sibling pairs, as a cloud VM would get them), "
-             "split over P pinned processes with T ORT threads each. **Max legs kept up** is the highest simultaneous "
+    L.append("> A scenario pins N logical CPUs of this edge machine (hardware-thread sibling pairs, so whole physical "
+             "cores) across P processes with T ORT threads each. **Max legs kept up** is the highest simultaneous "
              "leg count at which every leg stayed within the lag threshold, found by ramping then bisecting, then "
-             "re-run to confirm. A result of 0 means even one leg could not keep up on that shape. Memory slope is a "
+             "re-run to confirm. A result of 0 means even one leg could not keep up on that layout. Memory slope is a "
              "DERIVED regression over the healthy levels.\n")
-    L.append(_table(["Model", "Profile", "vCPU", "Procs x threads", "Base RSS (all procs)", "Load", "Max legs kept up",
+    L.append(_table(["Model", "Profile", "CPU threads", "Procs x threads", "Base RSS (all procs)", "Load", "Max legs kept up",
                      "First failing", "Confirmed", "Memory per leg (DERIVED)", "Stopped because"],
                     _scenario_rows(scenarios)) + "\n")
 
@@ -165,27 +171,23 @@ table as the planning case and the dense table as the upper bound.
         scs = sorted([s for s in scenarios if s.key == (model, profile)], key=lambda s: (s.processes, s.vcpus))
         tag = f"`{model}`, {profile}"
         sweep = [s for s in scs if s.processes == 1 and s.status == "ok"]
-        L.append(f"### 3.2 Scale-up with node size: {tag}\n")
+        L.append(f"### 3.2 More pinned threads on this CPU: {tag}\n")
         if sweep:
-            L.append("Single process, all threads. Diminishing returns show as falling legs-per-vCPU.\n")
-            base_eff = sweep[0].l_sat / sweep[0].vcpus if sweep[0].l_sat > 0 else None
-            rows = [[str(s.vcpus), str(s.l_sat), _f(s.l_sat / s.vcpus, 3),
-                     _f((s.l_sat / s.vcpus) / base_eff * 100, 0, "%") if base_eff else "n/a"] for s in sweep]
-            L.append(_table(["vCPU", "Max legs kept up (MEASURED)", "Legs per vCPU", f"Efficiency vs {sweep[0].vcpus} vCPU"], rows) + "\n")
+            L.append("Single process, using that many logical CPUs of this machine. Adding threads did not add legs in proportion.\n")
+            rows = [[str(s.vcpus), str(s.l_sat)] for s in sweep]
+            L.append(_table(["CPU threads pinned", "Max legs kept up (MEASURED)"], rows) + "\n")
         if ms.usl and sweep:
             u = ms.usl
-            L.append(f"**Universal Scalability Law fit (DERIVED, {u['n_points']} points, RMSE {u['rmse_legs']:.2f} legs):** "
-                     f"lambda = {u['lambda']:.3f} legs/vCPU, contention sigma = {u['sigma']:.3f}, coherency kappa = {u['kappa']:.4f}. "
-                     "With so few integer-valued points this describes the curve; it is not a validated predictor.\n")
-            rows = [[str(v), _f(c, 1), "EXTRAPOLATED" if v > max(s.vcpus for s in sweep) else "fit"]
-                    for v, c in ms.usl_extrapolation.items()]
-            L.append(_table(["vCPU", "Predicted saturation legs", "Tag"], rows) + "\n")
+            L.append(f"**Universal Scalability Law fit on these measured points only (DERIVED, {u['n_points']} points, "
+                     f"RMSE {u['rmse_legs']:.2f} legs):** lambda = {u['lambda']:.3f} legs/thread, contention sigma = "
+                     f"{u['sigma']:.3f}, coherency kappa = {u['kappa']:.4f}. This describes diminishing returns on *this* "
+                     "chip; it is not used to predict other CPUs.\n")
         else:
             L.append("_(not enough measured points with at least one sustained leg for a scaling-law fit)_\n")
 
         procs = [s for s in scs if s.vcpus == max((x.vcpus for x in scs), default=0)]
         if len(procs) > 1:
-            L.append(f"### 3.3 Process strategy at {procs[0].vcpus} vCPU: {tag}\n")
+            L.append(f"### 3.3 Process strategy at {procs[0].vcpus} CPU threads: {tag}\n")
             L.append("One process shares the weights between all legs (least memory, but all legs contend inside one "
                      "interpreter and one ORT thread pool). Several pinned processes duplicate the weights but isolate the contention.\n")
             rows = []
@@ -198,8 +200,8 @@ table as the planning case and the dense table as the upper bound.
 
         ref = ms.reference
         if ref.levels:
-            L.append(f"### 3.4 Latency vs load on the reference node: {tag} ({ref.label})\n")
-            L.append("This is why nodes are not run at their saturation point: staleness is flat, then climbs steeply.\n")
+            L.append(f"### 3.4 Latency vs load on the reference layout: {tag} ({ref.label})\n")
+            L.append("This is why a box is not run at its saturation point: staleness is flat, then climbs steeply.\n")
             rows = []
             for lv in sorted(ref.levels, key=lambda x: x["n_legs"]):
                 rows.append([str(lv["n_legs"]), _f(lv["n_legs"] / ref.l_sat, 2) if ref.l_sat else "n/a",
@@ -217,28 +219,28 @@ table as the planning case and the dense table as the upper bound.
 
     # ── model and assumptions ─────────────────────────────────────────────
     L.append("## 4. Model and assumptions\n")
-    L.append("For each node shape, model and profile: `legs/node = max(1, measured_saturation x headroom / serving_overhead)`; "
-             "`nodes = ceil(legs / legs_per_node) + max(min_spare, ceil(spare_fraction x nodes))`; "
-             "`vCPU = nodes x node_vCPU`; `RAM = nodes x roundup(((processes x weights) + legs_on_node x MB_per_leg) x ram_headroom + OS)`.\n")
+    L.append("For each layout, model and profile: `legs/box = max(1, measured_saturation x headroom / serving_overhead)`; "
+             "`boxes = ceil(legs / legs_per_box) + max(min_spare, ceil(spare_fraction x boxes))`; "
+             "`RAM/box = ceil(((processes x weights) + legs_on_box x MB_per_leg) x ram_headroom + OS)` in GB.\n")
     L.append(_table(["Factor", "Treatment", "Value", "Tag"], [
         ["Saturation point", "Highest simultaneous legs that all keep up (p95 staleness and end lag <= threshold), bisected to 1 leg, re-confirmed", "section 3.1", "MEASURED"],
         ["Speech density (profile)", "Silence skips inference, so a conversational leg costs less than a dense one. Both measured; real traffic must be checked against the profile used", "section 2 / 3.1", "MEASURED (profile) + ASSUMED (traffic mix)"],
-        ["Headroom / queueing", "Waiting time grows without bound as utilisation approaches 1, so nodes are run below the measured knee", f"{a.headroom:.0%} of saturation", "ASSUMED"],
+        ["Headroom / queueing", "Waiting time grows without bound as utilisation approaches 1, so each box is run below the measured knee", f"{a.headroom:.0%} of saturation", "ASSUMED"],
         ["Serving-layer overhead", "WebSocket framing, JSON acks, resampling and process supervision are not in the in-process test", f"x{a.serving_overhead:.2f} CPU", "ASSUMED"],
-        ["Spare capacity (N+k)", "A failed or draining node must not push the rest over the knee", f"max({a.min_spare_nodes}, {a.spare_fraction:.0%} of nodes)", "ASSUMED"],
+        ["Spare capacity (N+k)", "A failed or draining box must not push the rest over the knee", f"max({a.min_spare_nodes}, {a.spare_fraction:.0%} of boxes)", "ASSUMED"],
         ["Shared model memory", "Weights are one copy per process and shared by all legs in it; a pinned-process layout multiplies them", "Base RSS per layout, section 3.1/3.3", "MEASURED"],
         ["Per-leg memory", "Linear regression of peak RSS vs legs over healthy levels", "section 3.1", "DERIVED"],
-        ["RAM headroom / OS", "Allocator fragmentation, page cache and bursts; OS and agents. Node RAM is rounded up to a standard size and never below the usual compute-instance ratio", f"x{a.ram_headroom:.2f}, {a.os_reserve_gb:.0f} GB/node, min {a.min_ram_per_vcpu_gb:g} GB/vCPU", "ASSUMED"],
-        ["Thread contention / diminishing throughput", "Core sweep and USL fit; bigger nodes are not assumed proportionally better, so the guide scales out", "section 3.2", "MEASURED + DERIVED"],
-        ["Process strategy", "1 process vs several pinned processes compared at the top vCPU count; the best measured shape is the reference", "section 3.3", "MEASURED"],
-        ["NUMA", "Test machine is one socket / one NUMA node: cross-socket effects were not measured. On a multi-socket node run one pinned process group per socket and size per socket", "n/a", "ASSUMED"],
+        ["RAM headroom / OS", "Allocator fragmentation, page cache and bursts; OS and agents. Rounded up to a whole GB for this box", f"x{a.ram_headroom:.2f}, {a.os_reserve_gb:.0f} GB/box", "ASSUMED"],
+        ["Thread contention / diminishing throughput", "Measured as the saturation of this machine (one process, all threads). Extra legs need extra boxes; a bigger chip is not assumed to add legs in proportion", "section 3.1", "MEASURED"],
+        ["Process strategy", "Default is one process using the whole machine. Extra processes would duplicate weights; that trade-off is not swept", "1 process", "ASSUMED"],
+        ["NUMA", "Test machine is one socket / one NUMA node: cross-socket effects were not measured", "n/a", "ASSUMED"],
         ["Batching across legs", "The engines decode one stream per pass; no cross-leg batching exists, so none is credited. Batching would raise capacity but is unmeasured", "none credited", "NOT MODELLED"],
-        ["Scale-out", "Calls are sticky to a node, nodes share nothing, so capacity is additive across nodes; confidence falls with the extrapolation ratio", "ceil(N / legs per node)", "EXTRAPOLATED"],
-        ["Target RTF / P95 latency", "Values measured at the operating load on the reference node", "section 3.4", "MEASURED"],
+        ["Scale-out", "Calls are sticky to a box, boxes share nothing, so capacity is additive across identical edge boxes; confidence falls with the extrapolation ratio", "ceil(N / legs per box)", "EXTRAPOLATED"],
+        ["Target RTF / P95 latency", "Values measured at the operating load on the reference layout", "section 3.4", "MEASURED"],
     ]) + "\n")
 
     # ── sensitivity ───────────────────────────────────────────────────────
-    L.append("## 5. Sensitivity (nodes needed, including spares)\n")
+    L.append("## 5. Sensitivity (edge boxes needed, including spares)\n")
     L.append("How much the answer moves when an ASSUMED input or the 1-leg resolution of the measurement changes.\n")
     for (model, profile), ms in _ordered(sized):
         if not ms.rows:
@@ -250,7 +252,7 @@ table as the planning case and the dense table as the upper bound.
             ("headroom 80%", dataclasses.replace(a, headroom=0.80)),
             ("serving overhead x1.00", dataclasses.replace(a, serving_overhead=1.00)),
             ("serving overhead x1.25", dataclasses.replace(a, serving_overhead=1.25)),
-            ("no spare nodes", dataclasses.replace(a, spare_fraction=0.0, min_spare_nodes=0)),
+            ("no spare boxes", dataclasses.replace(a, spare_fraction=0.0, min_spare_nodes=0)),
         ]
         rows = []
         mine = [s for s in scenarios if s.key == (model, profile)]
@@ -260,31 +262,30 @@ table as the planning case and the dense table as the upper bound.
         rows.append(["measured saturation 1 leg higher"] + [f"{next(r for r in ms.rows if r.legs == n).nodes_low:,}" for n in probe])
         rows.append(["measured saturation 1 leg lower"] + [f"{next(r for r in ms.rows if r.legs == n).nodes_high:,}" for n in probe])
         L.append(f"**`{model}`, {profile}**\n")
-        L.append(_table(["Variant"] + [f"Nodes @ {n:,} legs" for n in probe], rows) + "\n")
+        L.append(_table(["Variant"] + [f"Boxes @ {n:,} legs" for n in probe], rows) + "\n")
 
     # ── limitations ───────────────────────────────────────────────────────
     L.append("## 6. Confidence and limitations\n")
-    L.append("""**Confidence rubric (judgement, stated so it can be challenged).** Measured = within the legs one test node sustained.
+    L.append("""**Confidence rubric (judgement, stated so it can be challenged).** Measured = within the legs one test box sustained.
 Beyond that confidence falls with the extrapolation ratio `N / measured saturation legs`: <= 10x Medium, <= 50x Low-Medium,
 <= 200x Low, above Very low; one level lower when the saturation point is only 1-2 legs, because its 1-leg resolution is then
-a +/-33-100% uncertainty on per-node capacity.
+a +/-33-100% uncertainty on per-box capacity.
 
-- **One machine, one CPU.** A laptop-class 8-core / 16-thread CPU with boost and thermal behaviour, not a server part. Cloud vCPUs
-  (different frequency, AVX-512, SMT sharing, noisy neighbours) will shift the saturation point, probably by tens of percent. Re-run
-  the load test on the target instance type before purchasing; the pipeline is the same.
+- **One machine, one CPU.** A laptop-class 8-core / 16-thread edge CPU with boost and thermal behaviour. Another edge box
+  (different frequency, SIMD, cooling) will shift the saturation point. Re-run the load test on the target hardware; the pipeline is the same.
 - **Shared test machine.** The IDE and a browser ran on the same machine and RAM was tight (little free memory, swap in use), which can only make
   results worse, not better, but adds noise. Memory-hungry layouts that did not fit in free RAM were skipped; they are listed in 3.1 with the
   measured per-process RSS.
 - **Load profile.** Three clean English read-speech clips looped into 30 s calls. Real calls also have noise, accents, other languages (more decoded
   tokens), overlap and talk ratios that vary by use case; the two profiles bracket speech density but not acoustic difficulty.
-- **Scaling beyond one node is assumed, not measured.** Only one machine was available, so the guide treats nodes as independent
-  (calls sticky to a node). Load-balancing skew, autoscaling lag, correlated peaks and failure domains are covered only by headroom and spares.
-- **No network path.** WebSocket, TLS, JSON and load-balancer cost are not in the test; ASSUMED overhead stands in for them.
+- **Scaling beyond one box is assumed, not measured.** Only one machine was available, so the guide treats extra edge boxes as independent
+  (calls sticky to a box). Load-balancing skew, correlated peaks and failure domains are covered only by headroom and spares.
+- **No network path.** WebSocket, TLS and JSON cost are not in the test; ASSUMED overhead stands in for them.
 - **The lag threshold is a design choice.** Saturation is defined as every leg's p95 staleness and end lag <= the threshold in section 3 (2 s by default). Streaming ASR
-  has a staleness floor of about 1.0-1.3 s even for one leg (hop + pass time), so the threshold sits close to it; at a 3 s threshold several shapes
+  has a staleness floor of about 1.0-1.3 s even for one leg (hop + pass time), so the threshold sits close to it; at a 3 s threshold several layouts
   would sustain one more leg (see the latency-vs-load tables in 3.4 for how near the knee the failing level was). Re-run with `slo.lag_threshold_s` set to your product SLO.
 - **Saturation resolution is whole legs and was re-confirmed once**, not statistically repeated. The +/-1 leg sensitivity in section 5 is the honest error bar;
-  at 1-2 legs per node it is large.
+  at 1-2 legs per box it is large.
 - **Short calls.** 30 s calls; memory growth over hour-long calls was not measured (the streaming code bounds buffers: Qwen force-commits at 15 s, Whisper windows cap at 20 s).
 - **No batching credit.** Cross-leg batching of the encoder/decoder would reduce cost per leg but is not implemented here, so it is neither measured nor assumed.
 """)

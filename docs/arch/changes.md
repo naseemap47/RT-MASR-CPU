@@ -19,6 +19,7 @@
 | 8 | Offline benchmark pipeline | 2026-10-04 |
 | 9 | Whisper ONNX engine (benchmark comparison) | 2026-10-05 |
 | 10 | Load test and capacity sizing | 2026-10-06 |
+| 11 | Load test retargeted to edge CPU (no cloud SKU math) | 2026-10-07 |
 
 ---
 
@@ -609,5 +610,25 @@ to size a fleet for tens to thousands of simultaneous calls.
 
 ### Result on the development laptop (8C/16T)
 
-Saturation at 1-3 legs per node; more cores in one process did not help, two pinned processes helped Whisper, four hurt. The sizing for
+Saturation at 1-3 legs per box; more cores in one process did not help, two pinned processes helped Whisper, four hurt. The sizing for
 50+ legs is therefore extrapolated and stated as such.
+
+---
+
+## 11. Load Test Retargeted to Edge CPU
+
+### Problem
+
+The first load-test sizing treated pinned CPU layouts as stand-ins for cloud VMs (sibling-pair "vCPUs", 2 GB/vCPU instance
+RAM, predicted larger chips, fleet vCPU totals). This project deploys on edge CPUs.
+
+### Changes
+
+- Topology comments and CLI (`--cpus`) describe pinning logical CPUs of **this** machine, not modeling an instance type.
+- Sizing RAM is the GB the box needs (ceil of measured weights + per-leg RSS + OS), not a cloud SKU.
+- Sizing tables report **edge boxes**, **CPU threads / box** and **RAM / box**. Fleet "Estimated vCPU" and predicted
+  32/64/128-thread capacities were removed.
+- Docs (`docs/loadtest/*`, `docs/deployment.md` section 9, README, project guide) match that edge framing.
+
+The 4/8/16-thread × process **scenario matrix** was later dropped: each model × profile is ramped once on the whole
+machine. `core_sweep` / `process_sweep` were removed from `loadtest_config.yaml`.

@@ -84,14 +84,14 @@ class LoadtestReporter:
                 (ramp.stop_reason if ramp else sc.get("status", "")) or sc.get("status", ""),
                 (sc.get("error") or (ramp.note if ramp else "") or "").replace("|", "/")[:140],
             ])
-        L.append(_table(["Model", "Profile", "vCPU", "Procs x threads", "Base RSS (all procs)", "Load",
+        L.append(_table(["Model", "Profile", "CPU threads", "Procs x threads", "Base RSS (all procs)", "Load",
                          "Max legs kept up", "First failing", "Confirmed", "Stopped because", "Note"], rows) + "\n")
 
         for sc in scenarios:
             ramp = sc.get("ramp")
             if not ramp or not ramp.levels:
                 continue
-            L.append(f"### {sc['model_id']} [{sc.get('profile', 'dense')}] - {sc['vcpus']} vCPU, {sc['processes']} process(es) x "
+            L.append(f"### {sc['model_id']} [{sc.get('profile', 'dense')}] - {sc['vcpus']} CPU threads, {sc['processes']} process(es) x "
                      f"{sc['threads_per_process']} threads ({sc['stream_mode']})\n")
             rows = []
             for lv in ramp.levels:

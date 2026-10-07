@@ -1,11 +1,10 @@
 # loadtest/topology.py
 """
-CPU topology helpers: pick the logical CPUs a load-test scenario may use.
+CPU topology helpers: pick the logical CPUs a load-test scenario may use on this edge machine.
 
-A "vCPU" in a cloud VM is one hardware thread, and vCPUs come in sibling pairs
-(one physical core = 2 vCPUs). To model an N-vCPU node on a bigger machine we therefore
-take whole sibling pairs first (CPUs 0,1 = core 0; 2,3 = core 1; ...) rather than one
-thread per core, which would flatter the result.
+A physical core on SMT hardware has two sibling threads. Pinning takes whole sibling pairs
+first (both threads of a core) so a "4 CPU" layout is two full cores, not four threads on
+four different cores (which would flatter the result on this chip).
 """
 from __future__ import annotations
 
@@ -52,12 +51,12 @@ def ordered_cpus(cpus: list[int] | None = None) -> list[int]:
     return out
 
 
-def cpu_set(vcpus: int, cpus: list[int] | None = None) -> list[int]:
-    """The first ``vcpus`` CPUs in sibling-pair order (sorted for readability)."""
+def cpu_set(n_cpus: int, cpus: list[int] | None = None) -> list[int]:
+    """The first ``n_cpus`` logical CPUs in sibling-pair order (sorted for readability)."""
     order = ordered_cpus(cpus)
-    if vcpus <= 0 or vcpus > len(order):
-        raise ValueError(f"requested {vcpus} vCPUs but only {len(order)} are available")
-    return sorted(order[:vcpus])
+    if n_cpus <= 0 or n_cpus > len(order):
+        raise ValueError(f"requested {n_cpus} CPUs but only {len(order)} are available")
+    return sorted(order[:n_cpus])
 
 
 def split_cpus(cpus: list[int], n_procs: int) -> list[list[int]]:

@@ -11,6 +11,7 @@ from benchmark.runners.streaming_concurrency_runner import StreamingConcurrencyR
 from loadtest.audio import tile_call_audio
 from loadtest.runners.ramp import evaluate_level, merge_level_results, run_ramp
 from loadtest.runners.worker_pool import MemoryAbort, WorkerPool
+from loadtest.run_loadtest import expand_scenarios
 from loadtest.topology import cpu_set, ordered_cpus, split_cpus
 
 
@@ -27,6 +28,18 @@ def test_cpu_set_and_split_are_disjoint_and_sized():
         assert [len(g) for g in groups] == [2, 2]
         assert not set(groups[0]) & set(groups[1])
         assert sorted(groups[0] + groups[1]) == sel
+
+
+def test_expand_scenarios_is_one_run_per_model_and_profile():
+    cfg = {"profiles": {"dense": {}, "conversational": {}},
+           "models": [{"id": "a"}, {"id": "b"}]}
+    runs = expand_scenarios(cfg, n_cpus=16, models=None, processes=1)
+    assert [(r["profile"], r["model_id"], r["vcpus"], r["processes"]) for r in runs] == [
+        ("dense", "a", 16, 1), ("dense", "b", 16, 1),
+        ("conversational", "a", 16, 1), ("conversational", "b", 16, 1),
+    ]
+    only = expand_scenarios(cfg, n_cpus=8, models=["b"], processes=1, profiles=["conversational"])
+    assert only == [{"model_id": "b", "profile": "conversational", "vcpus": 8, "processes": 1}]
 
 
 def test_cpu_set_rejects_impossible_requests():

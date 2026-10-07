@@ -706,6 +706,9 @@ benchmark write-up also read the batch-mode concurrency row as "about 4 live cal
 - New `docs/arch/system_architecture.md`: the POC as built and the recommended production architecture in one document, with
   architecture decisions, the POC-to-production delta and risks.
 - `docs/deployment.md` moved to `docs/arch/deployment.md`, next to the other architecture documents; links updated.
+- New `docs/arch/alternatives_analysis.md`: models (Moonshine, Omnilingual ASR, sherpa-onnx, SenseVoice, Whisper variants),
+  runtimes and streaming designs considered, trade-offs, and prioritised next experiments (real call data, metrics beyond
+  WER/CER, prefix-forced Qwen decoding, Moonshine lane).
 - `docs/loadtest/sizing_guide.md` rewritten for 50 / 100 / 200 / 500 / 1,000 legs from the final run, with CPU threads, physical
   cores and RAM per target, and an explicit measured / derived / assumed / extrapolated breakdown.
 - README, `docs/deployment.md`, `docs/project_guide.md` and `docs/loadtest/loadtest.md` refreshed from the final runs (INT4 added

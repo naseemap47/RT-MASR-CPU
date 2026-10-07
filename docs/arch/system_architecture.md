@@ -11,6 +11,7 @@ This document describes the architecture end to end: the proof of concept **as i
 | Measured results | [`../benchmark/final_result.md`](../benchmark/final_result.md), [`../loadtest/final_result.md`](../loadtest/final_result.md) |
 | Sizing for 50-1,000 legs | [`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) |
 | Full technical report | [`../report/technical_report.md`](../report/technical_report.md) |
+| Other models, runtimes and designs; next experiments | [`alternatives_analysis.md`](alternatives_analysis.md) |
 
 **Status labels**
 

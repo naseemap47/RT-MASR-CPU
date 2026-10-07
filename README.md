@@ -589,6 +589,7 @@ jq -s 'group_by(.trace_id)[] | {trace_id: .[0].trace_id, runs: [.[] | {name, lat
 | Document | Contents |
 |---|---|
 | [`docs/arch/system_architecture.md`](docs/arch/system_architecture.md) | System architecture: POC as built plus the recommended production architecture, decisions and risks |
+| [`docs/arch/alternatives_analysis.md`](docs/arch/alternatives_analysis.md) | Alternative models, runtimes and streaming designs, trade-offs, and prioritised next experiments (data, metrics, Moonshine) |
 | [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract, AI traces |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/report/technical_report.md`](docs/report/technical_report.md) | Technical report: methodology, environment, results, bottlenecks, sizing, recommendations (figures in `docs/report/figures/`) |

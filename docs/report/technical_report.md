@@ -535,6 +535,8 @@ flowchart LR
 ## 12. Alternative models/designs
 
 None of the options below was measured in this project. They are ranked by how directly they address the bottleneck in section 9.
+The full comparison of CPU options (Moonshine, Omnilingual ASR, prefix-forced Qwen decoding, per-language engines, licences) and the
+experiment plan are in [`../arch/alternatives_analysis.md`](../arch/alternatives_analysis.md).
 
 ### 12.1 Design changes (same models)
 
@@ -590,6 +592,9 @@ Language coverage (EN + ZH + ID) must be checked for each before adopting it.
 
 ### 13.3 Next experiments (in priority order)
 
+Each experiment is expanded with a hypothesis, method and success criterion in section 9 of
+[`../arch/alternatives_analysis.md`](../arch/alternatives_analysis.md), together with the data and metrics needed beyond WER/CER.
+
 1. **Accuracy on real telephony audio:** 8 kHz G.711, both channels, all three languages, human-verified references.
    Re-run `benchmark/run_benchmark.py` with a fixed language for INT4.
 2. **Cost reduction of the streaming loop:** load-test the draft-rate options (every 2nd vs 4th chunk; `hop_s` 1 vs 2 s) and a
@@ -616,4 +621,5 @@ python3 docs/report/make_figures.py                      # figures for this repo
 
 Related documents: [`../arch/architecture.md`](../arch/architecture.md) (POC internals), [`../how-streaming-works.md`](../how-streaming-works.md),
 [`../benchmark/benchmarking.md`](../benchmark/benchmarking.md), [`../loadtest/loadtest.md`](../loadtest/loadtest.md),
-[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) (sizing for 50-1,000 legs), [`../arch/deployment.md`](../arch/deployment.md) (production design).
+[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) (sizing for 50-1,000 legs), [`../arch/deployment.md`](../arch/deployment.md) (production design),
+[`../arch/alternatives_analysis.md`](../arch/alternatives_analysis.md) (alternatives and next experiments).

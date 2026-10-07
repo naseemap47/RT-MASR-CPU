@@ -51,6 +51,7 @@ safety:
 # Models to load-test. Each model is ramped on this whole machine (all logical CPUs, one process).
 models:
   - id: "qwen3_onnx_int8_0.6b"
+  - id: "qwen3_onnx_int4_0.6b"
   - id: "whisper_int8_tiny"
 
 output_dir: "loadtest/results"

@@ -15,7 +15,8 @@ loadtest_config.yaml ──> run_loadtest.py ──> <UTC>_loadtest_raw.json / _
                         run_sizing.py ──> <UTC>_sizing_guide.md / _sizing.json          (DERIVED / EXTRAPOLATED)
 ```
 
-Final curated results: [`sizing_guide.md`](sizing_guide.md).
+Final results: [`final_result.md`](final_result.md) (run `20261007T202154Z`, Qwen3 INT8 / INT4 0.6B and Whisper tiny).
+The earlier curated sizing tables (run `20261007T170448Z`, without INT4) are in [`sizing_guide.md`](sizing_guide.md).
 
 ## What is simulated
 

@@ -1,9 +1,13 @@
 # RT-MASR-CPU — Final Benchmark Result
 
 Consolidated from the run `20261005T173127Z`
-([raw JSON](20261005T173127Z_raw.json) · [full summary](20261005T173127Z_summary.md)).
+([raw JSON](../../benchmark/results/20261005T173127Z_raw.json) (Not Uploaded) · [full summary](../../benchmark/results/20261005T173127Z_summary.md)).
 All numbers below come from that run unless stated otherwise; derived figures (per-language RTF,
 speed-ups, the corrected INT4 number) were recomputed from the raw JSON.
+
+This benchmark measures **one transcription at a time** (speed, accuracy, memory). How many **live streamed calls**
+one machine can carry is a different question, answered by the load test:
+[`../loadtest/final_result.md`](../loadtest/final_result.md).
 
 ## 1. Setup
 
@@ -14,7 +18,7 @@ speed-ups, the corrected INT4 number) were recomputed from the raw JSON.
 | OS / Python | Linux 6.8.0-138 (x86_64) / 3.12.13 |
 | onnxruntime / torch / transformers | 1.30.0 / 2.14.1 / 4.57.6 |
 | Latency | 7 files (3 EN, 2 ZH, 2 ID), 3 measured runs + 1 warm-up each |
-| Concurrency | 1 / 2 / 4 simultaneous legs, 2 rounds each, same file (`librispeech_0_1089_0.wav`) |
+| Concurrency | **batch mode**: 1 / 2 / 4 workers, each calling `transcribe()` on the whole file back to back, 2 rounds each, same file (`librispeech_0_1089_0.wav`). This run predates the streaming concurrency runner |
 | Models run | 10 configs, 0 load failures, 0 concurrency errors |
 | **Not run** | `qwen3_onnx_fp32_1.7b` (disabled in `bench_config.yaml`; ~10 GB of weights on a 14.9 GB machine) |
 
@@ -75,9 +79,9 @@ RTF = processing time / audio time (lower is better, < 1.0 is faster than real t
 - Only Whisper small and medium reach Qwen-level accuracy on EN (WER 0.019), at RTF 1.7 and 6.4. They cannot keep up with live audio.
 - Whisper saturates the CPU (~95% mean) while Qwen ONNX uses ~55%, and Whisper medium reaches 10.4 GB RSS.
 
-**Concurrency (shared engine, one process)**
+**Concurrency (batch mode, shared engine, one process)**
 
-| Config | Throughput 1 / 2 / 4 legs (x real time) | RTF per call at 4 legs | Keeps RTF < 1 at 4 legs? |
+| Config | Throughput 1 / 2 / 4 workers (x real time) | RTF per call at 4 workers | Keeps RTF < 1 at 4 workers? |
 |---|---|---|---|
 | INT8 0.6B | 6.1 / 6.5 / 6.7 | 0.59 | yes |
 | FP32 0.6B | 3.0 / 3.1 / 3.3 | 1.17 | no (ok at 2: 0.63) |
@@ -86,8 +90,12 @@ RTF = processing time / audio time (lower is better, < 1.0 is faster than real t
 | BF16 0.6B | 1.6 / 1.7 / 1.7 | 2.40 | no (ok at 1 only) |
 | Whisper tiny | 3.3 / 3.7 / 3.9 | 1.01 | borderline |
 
-- Throughput barely grows with more legs (+10% from 1 to 4 for INT8 0.6B) because a single ONNX Runtime session already uses all cores. More legs mostly add latency: per-call RTF roughly quadruples from 1 to 4 legs.
-- Practical capacity on this 8-core machine is about **4 live calls for INT8 0.6B**, about **2 for 1.7B INT4 or FP32 0.6B**, and 1 for BF16 1.7B and Whisper small/medium.
+- Throughput barely grows with more workers (+10% from 1 to 4 for INT8 0.6B) because a single ONNX Runtime session already uses all cores. More workers mostly add latency: per-call RTF roughly quadruples from 1 to 4.
+- **This is offline throughput, not live-call capacity.** Each worker transcribes a complete file once. A live call
+  re-transcribes its open audio every second, and every leg must stay within a latency limit. The streaming load test
+  ([`../loadtest/final_result.md`](../loadtest/final_result.md)) measured that this machine keeps up with only
+  **1 live leg for INT8 0.6B and INT4 0.6B**, and **2–3 for Whisper tiny**. An earlier version of this page read
+  "about 4 live calls for INT8 0.6B" from the batch row; that figure was too high.
 
 ## 4. Issue found: INT4 0.6B returns empty text on one clip
 
@@ -106,6 +114,10 @@ Impact on the numbers above:
 
 For the INT4 0.6B concurrency row, expect a figure close to INT8 0.6B (roughly 6–7x), but this run did not measure it.
 
+The streaming load test did **not** reproduce the empty output. There, the same clip is cut at pauses into shorter
+utterances (still with language auto-detect), and every INT4 leg returned the full transcript at every load level. The
+problem shows up when the whole 10.4 s clip is decoded in one pass, so the INT4 load-test numbers are valid.
+
 Language auto-detection is also less stable on INT4: `ind_001.wav` was detected as Malay by 0.6B INT4 and `ind_002.wav` as Malay by 1.7B INT4. Whisper base also reported `ms` for `ind_001.wav`. The text was still correct.
 
 Suggested follow-ups (not done here):
@@ -123,7 +135,9 @@ Suggested follow-ups (not done here):
 
 | Goal | Pick |
 |---|---|
-| Best speed/accuracy balance for live calls | `qwen3_onnx_int8_0.6b`: RTF 0.15, supports ~4 concurrent calls, 5.1 GB RAM |
-| Highest accuracy that still runs in real time | `qwen3_onnx_int4_1.7b`: RTF 0.245, near-perfect EN/ZH, about 2 concurrent calls, 6.3 GB RAM |
-| Smallest footprint | `qwen3_onnx_int4_0.6b`, but set the language explicitly (or retry on empty output) until the issue in section 4 is resolved |
+| Best speed/accuracy balance for live calls | `qwen3_onnx_int8_0.6b`: RTF 0.15, 5.1 GB RAM. Carries 1 live leg per 16-thread box in the streaming load test |
+| Highest accuracy that still runs in real time | `qwen3_onnx_int4_1.7b`: RTF 0.245, near-perfect EN/ZH, 6.3 GB RAM. Not load-tested; it costs ~1.6x INT8 0.6B per audio second, so do not expect more than 1 live leg on this machine |
+| Smallest footprint | `qwen3_onnx_int4_0.6b`: same live capacity as INT8 (1 leg) with ~1.2 GB less RAM and ~12% less compute per leg in the load test. Set the language explicitly (or retry on empty output) until the issue in section 4 is resolved |
 | Avoid | `qwen3_onnx_fp32_0.6b` (no accuracy gain over INT8, 1.8x slower, ~2x RAM); Whisper small/medium and `qwen3_transformers_bf16_1.7b` for live use (RTF > 1) |
+
+For capacity planning (how many edge boxes for 50–1,000 live legs), use [`../loadtest/final_result.md`](../loadtest/final_result.md), not the batch concurrency rows above.

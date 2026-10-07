@@ -70,6 +70,7 @@ python3 loadtest/run_loadtest.py --list                          # show runs
 python3 loadtest/run_loadtest.py                                  # every model x profile in loadtest_config.yaml
 python3 loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny
 python3 loadtest/run_loadtest.py --levels 1,2 --duration 15      # smoke run
+# Console + logging for the run: logs/loadtest/<UTC>/run.log  (same UTC stamp as the result files)
 python3 loadtest/run_sizing.py --input <dense_raw.json> <conv_raw.json>
 python3 loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fraction 0.2 --legs 50,100,1000
 ```

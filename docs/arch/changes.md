@@ -20,6 +20,7 @@
 | 9 | Whisper ONNX engine (benchmark comparison) | 2026-10-05 |
 | 10 | Load test and capacity sizing | 2026-10-06 |
 | 11 | Load test retargeted to edge CPU (no cloud SKU math) | 2026-10-07 |
+| 12 | Per-run logging under `logs/` | 2026-10-07 |
 
 ---
 
@@ -637,3 +638,17 @@ The generated sizing guide now has one section 3 subsection per model and profil
 process-strategy comparisons only appear when a result file holds several layouts. The curated guide, README, deployment
 and project guide were refreshed from the whole-machine run `20261007T170448Z`: Whisper tiny 3 conversational / 2 dense legs,
 Qwen3-0.6B 1 / 1 (one leg more than the October 6 run for Whisper and Qwen dense, within run-to-run noise).
+
+---
+
+## 12. Per-run logging under `logs/`
+
+### Problem
+
+Every pipeline (`main.py`, benchmark, load test, sizing, download, check_models) printed to the terminal and nowhere else. A long load-test or a failed engine load left no record, and result files (`*_raw.json`) were not joined to the console output that explained them.
+
+### Changes
+
+- New `src/core/runlog.py`: each CLI invocation creates `logs/<pipeline>/<UTC stamp>/` with `run.log` (stdout/stderr tee + formatted `logging` records) and `run.meta.json` (argv, pid, duration, exit code, artifact paths). The stamp is the same one the reporters use for JSON/Markdown results.
+- Application `print()` calls in engines, runners and CLIs became `logging` (`rtmasr.*` loggers). Load-test workers and `check_models` children write under `workers/`.
+- Pytest does not auto-create log dirs (`skip_if_pytest` on the server lifespan). `RT_MASR_LOG_DIR` / `RT_MASR_LOG_LEVEL` / `RT_MASR_NO_LOG` override the defaults.

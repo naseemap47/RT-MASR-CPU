@@ -18,10 +18,10 @@ Relative paths are resolved from the project root.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import tempfile
-import traceback
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +37,9 @@ from loadtest.reporters.loadtest_reporter import LoadtestReporter
 from loadtest.runners.ramp import RampResult, run_ramp
 from loadtest.runners.worker_pool import InsufficientMemory, WorkerPool
 from loadtest.topology import available_cpus, cpu_set, split_cpus
+from src.core.runlog import current_run, start_run
+
+logger = logging.getLogger("rtmasr.loadtest")
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,18 +122,22 @@ def run_scenario(entry: dict, sc: dict, cfg: dict, call_audio: list[str], ramp_l
         "vcpus": sc["vcpus"], "processes": sc["processes"], "threads_per_process": threads,
         "cpus": cpus, "status": "ok", "error": "", "ready": [], "base_rss_mb": 0.0, "load_s": 0.0, "ramp": None,
     }
-    print(f"\n{'=' * 78}\n  {entry['id']} [{prof_name}, gap {gap_s:g}s]: {sc['vcpus']} CPU threads, {sc['processes']} process(es) x {threads} threads "
-          f"(CPUs {cpus[0]}-{cpus[-1]})\n{'=' * 78}")
+    logger.info("\n%s\n  %s [%s, gap %gs]: %s CPU threads, %s process(es) x %s threads "
+                "(CPUs %s-%s)\n%s",
+                "=" * 78, entry["id"], prof_name, gap_s, sc["vcpus"], sc["processes"],
+                threads, cpus[0], cpus[-1], "=" * 78)
 
+    session = current_run()
     pool = WorkerPool(entry, groups, runner_cfg,
-                      reserve_mb=float(safety["reserve_mb"]), hard_floor_mb=float(safety["hard_floor_mb"]))
+                      reserve_mb=float(safety["reserve_mb"]), hard_floor_mb=float(safety["hard_floor_mb"]),
+                      log_dir=str(session.dir) if session is not None else None)
     try:
         ready = pool.start()
         result["ready"] = ready
         result["base_rss_mb"] = sum(r["rss_mb"] for r in ready)
         result["load_s"] = max(r["load_s"] for r in ready)
-        print(f"  [loadtest] {len(ready)} worker(s) ready: load {result['load_s']:.1f}s, "
-              f"RSS {result['base_rss_mb']:.0f} MB (after warm-up)")
+        logger.info("  [loadtest] %s worker(s) ready: load %.1fs, RSS %.0f MB (after warm-up)",
+                    len(ready), result["load_s"], result["base_rss_mb"])
         result["ramp"] = run_ramp(
             pool, ramp_levels,
             spread_s=float(call["start_spread_s"]), call_duration_s=float(call["duration_s"]),
@@ -139,25 +146,25 @@ def run_scenario(entry: dict, sc: dict, cfg: dict, call_audio: list[str], ramp_l
             base_rss_mb=result["base_rss_mb"], **ramp_opts,
         )
         r: RampResult = result["ramp"]
-        print(f"\n  [loadtest] RESULT: max legs kept up = {r.l_sat}, first failing = {r.l_fail}, "
-              f"stopped: {r.stop_reason}{' (confirmed)' if r.confirmed else ''}")
+        logger.info("  [loadtest] RESULT: max legs kept up = %s, first failing = %s, "
+                    "stopped: %s%s",
+                    r.l_sat, r.l_fail, r.stop_reason, " (confirmed)" if r.confirmed else "")
     except InsufficientMemory as exc:
         result["status"], result["error"] = "infeasible_memory", str(exc)
         result["base_rss_mb"] = exc.info["per_process_rss_mb"] * sc["processes"]
         result["load_s"] = exc.info["load_s"]
-        print(f"  [loadtest] SKIPPED (memory): {exc}")
+        logger.warning("  [loadtest] SKIPPED (memory): %s", exc)
     except KeyboardInterrupt:
         raise
     except Exception as exc:
-        traceback.print_exc()
+        logger.exception("scenario failed")
         result["status"], result["error"] = "error", f"{type(exc).__name__}: {str(exc)[:300]}"
     finally:
         pool.close()
     return result
 
 
-def main() -> None:
-    args = parse_args()
+def _run(args: argparse.Namespace, run) -> None:
     config_path = os.path.abspath(args.config)
     cli_out = os.path.abspath(args.output_dir) if args.output_dir else None
     os.chdir(_PROJECT_ROOT)
@@ -190,7 +197,8 @@ def main() -> None:
 
     if args.list:
         for sc in scenarios:
-            print(f"{sc['profile']:<15} {sc['model_id']:<28} {sc['vcpus']:>3} CPU threads  {sc['processes']} process(es)")
+            logger.info("%-15s %-28s %3s CPU threads  %s process(es)",
+                        sc["profile"], sc["model_id"], sc["vcpus"], sc["processes"])
         return
 
     call_audio = [a for a in cfg["call"]["audio"] if os.path.exists(a)]
@@ -203,7 +211,8 @@ def main() -> None:
         "confirm": bool(cfg["ramp"].get("confirm", True)) and not args.no_confirm,
     }
 
-    reporter = LoadtestReporter(cli_out or cfg.get("output_dir", "loadtest/results"))
+    stamp = run.stamp if run is not None else None
+    reporter = LoadtestReporter(cli_out or cfg.get("output_dir", "loadtest/results"), stamp=stamp)
     results: dict = {
         "hardware": collect_hardware_info(),
         "params": {
@@ -224,18 +233,28 @@ def main() -> None:
             results["scenarios"].append(
                 run_scenario(entries[sc["model_id"]], sc, cfg, call_audio, ramp_levels, ramp_opts))
         except KeyboardInterrupt:
-            print("\nInterrupted: writing partial results.")
+            logger.warning("Interrupted: writing partial results.")
             interrupted = True
         reporter.write_json(results)               # after every scenario, so a crash loses nothing
         reporter.render_summary(results)
         if interrupted:
             break
 
-    print(f"\n✓ Raw JSON   : {reporter.json_path}\n✓ Summary MD : {reporter.summary_path}")
+    if run is not None:
+        run.note_artifact("raw_json", reporter.json_path)
+        run.note_artifact("summary_md", reporter.summary_path)
+    logger.info("Raw JSON   : %s", reporter.json_path)
+    logger.info("Summary MD : %s", reporter.summary_path)
     bad = [s for s in results["scenarios"] if s["status"] == "error"]
     if bad:
-        print(f"⚠ {len(bad)} scenario(s) errored")
+        logger.warning("%d scenario(s) errored", len(bad))
         sys.exit(2)
+
+
+def main() -> None:
+    args = parse_args()
+    with start_run("loadtest") as run:
+        _run(args, run)
 
 
 if __name__ == "__main__":

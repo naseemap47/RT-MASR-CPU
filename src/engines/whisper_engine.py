@@ -32,6 +32,7 @@ Drop-in integration::
 """
 
 import io
+import logging
 import os
 import sys
 import time
@@ -44,6 +45,8 @@ import onnx
 import onnxruntime as ort
 import psutil
 from onnx.serialization import ProtoSerializer
+
+logger = logging.getLogger("rtmasr.engines.whisper")
 
 # ── suppress noisy runtime warnings ────────────────────────────────────────
 warnings.simplefilter("ignore", FutureWarning)
@@ -169,7 +172,7 @@ def _load_onnx(
             f"  Available precisions: {AVAILABLE_PRECISIONS}"
         )
 
-    print(f"  [whisper_engine] Loading: {path}")
+    logger.info("Loading: %s", path)
     serializer: ProtoSerializer = onnx._get_serializer(fmt="protobuf")
     graph = onnx.load(path)
     return serializer.serialize_proto(proto=graph)
@@ -389,7 +392,7 @@ class WhisperOnnxPipeline:
         providers = ["CPUExecutionProvider"]
 
         # ── Encoder ─────────────────────────────────────────────────────────
-        print(f"[whisper_engine] Loading {model_name} encoder ({precision}) …")
+        logger.info("Loading %s encoder (%s) …", model_name, precision)
         enc_bytes = _load_onnx(f"{model_name}_encoder", model_dir, precision)
         self._encoder = ort.InferenceSession(
             path_or_bytes=enc_bytes,
@@ -402,7 +405,7 @@ class WhisperOnnxPipeline:
         }
 
         # ── Decoder ─────────────────────────────────────────────────────────
-        print(f"[whisper_engine] Loading {model_name} decoder ({precision}) …")
+        logger.info("Loading %s decoder (%s) …", model_name, precision)
         dec_bytes = _load_onnx(f"{model_name}_decoder", model_dir, precision)
         self._decoder = ort.InferenceSession(
             path_or_bytes=dec_bytes,
@@ -418,7 +421,7 @@ class WhisperOnnxPipeline:
         # real request does not pay ~2 s of import / tokenizer-load time.
         self._warm_decoding_stack()
 
-        print(f"[whisper_engine] Pipeline ready  model={model_name}  precision={precision}.")
+        logger.info("Pipeline ready  model=%s  precision=%s.", model_name, precision)
 
     # ------------------------------------------------------------------
     # Internal helpers

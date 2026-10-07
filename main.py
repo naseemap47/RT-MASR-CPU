@@ -36,6 +36,7 @@ Whisper                      Sliding-window mode (src/engines/whisper_streaming.
 
 import asyncio
 import json
+import logging
 import time
 import psutil
 import threading
@@ -48,8 +49,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from src.core.config import resolve_model_config, load_server_config
+from src.core.runlog import begin_run
 from src.engines.live_call_session import LiveCallSession
 from src.engines.whisper_streaming import StreamingConfig, WhisperSlidingWindowStreamer
+
+logger = logging.getLogger("rtmasr.server")
+_run_session = None
 
 # ── Config paths ──────────────────────────────────────────────────────────────
 CONFIG_PATH = "config/config.yaml"
@@ -117,19 +122,28 @@ def _load_active_model() -> ASREngine:
     _active_backend    = model_cfg.get("backend", "?")
     _streaming_cfg     = StreamingConfig.from_dict(model_cfg.get("streaming"))
 
-    print(f"Loading ASR engine: {_active_model_name} (backend={_active_backend}) ...")
+    logger.info("Loading ASR engine: %s (backend=%s) ...", _active_model_name, _active_backend)
     _engine = _build_engine(model_cfg)
     return _engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model_ready
+    global _model_ready, _run_session
+
+    server_cfg = load_server_config(CONFIG_PATH)
+    level = os.environ.get("RT_MASR_LOG_LEVEL") or server_cfg.get("server", {}).get("log_level", "info")
+    _run_session = begin_run("server", level=level, skip_if_pytest=True)
 
     _load_active_model()
     _model_ready = True
-    print(f"Engine ready: {_active_model_name} (stream mode: {_stream_mode()})")
-    yield
+    logger.info("Engine ready: %s (stream mode: %s)", _active_model_name, _stream_mode())
+    try:
+        yield
+    finally:
+        if _run_session is not None:
+            _run_session.close()
+            _run_session = None
 
 
 def get_engine() -> ASREngine:
@@ -437,9 +451,7 @@ async def _handle_audio_sliding(
     try:
         update = await asyncio.get_running_loop().run_in_executor(None, streamer.step)
     except Exception as exc:                        # keep the call alive on a bad pass
-        import traceback
-        traceback.print_exc()
-        print(f"[sliding-window] pass failed: {exc}")
+        logger.exception("sliding-window pass failed: %s", exc)
         return carry
     infer_duration_s = time.time() - t_infer_start
 
@@ -463,6 +475,9 @@ async def _handle_audio_sliding(
 @app.websocket("/ws/call-stream")
 async def websocket_call_stream(websocket: WebSocket):
     await websocket.accept()
+    peer = getattr(websocket.client, "host", None)
+    logger.info("websocket connected  peer=%s  model=%s  mode=%s",
+                peer, _active_model_name, _stream_mode())
     await websocket.send_json({
         "type": "connected",
         "model_ready": _model_ready,
@@ -504,6 +519,7 @@ async def websocket_call_stream(websocket: WebSocket):
 
                 if msg_type == "start_call":
                     state.language = data.get("language")
+                    logger.info("call start  language=%s", state.language or "auto")
                     # ── T0: call-start ─────────────────────────────────
                     session.mark_call_start()
 
@@ -517,6 +533,7 @@ async def websocket_call_stream(websocket: WebSocket):
                             encoding=audio_fmt.get("encoding"),
                         )
                     except (ValueError, TypeError) as exc:
+                        logger.warning("unsupported audio format: %s", exc)
                         await websocket.send_json({
                             "type": "error",
                             "error": "unsupported_audio_format",
@@ -583,6 +600,8 @@ async def websocket_call_stream(websocket: WebSocket):
                         metrics["stream_mode"] = "vad_utterance"
 
                     metrics["total_call_time_s"] = round(total_call_time, 2)
+                    logger.info("call ended  duration_s=%.2f  chars=%d",
+                                total_call_time, len(final_text or ""))
 
                     await websocket.send_json({
                         "type": "call_ended",
@@ -592,7 +611,7 @@ async def websocket_call_stream(websocket: WebSocket):
                     break
 
     except WebSocketDisconnect:
-        pass
+        logger.info("websocket disconnected")
     finally:
         reader.cancel()
 

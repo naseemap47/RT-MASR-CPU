@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import os
 import platform
 import statistics
@@ -53,6 +54,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULT_TAG = "@@RESULT@@ "
+logger = logging.getLogger("rtmasr.check_models")
 
 # ── Tunables ──────────────────────────────────────────────────────────────────
 REALTIME_RTF   = 0.5      # <= this: REAL-TIME
@@ -292,6 +294,17 @@ def run_model(rep: ModelReport, audio: str, runs: int, timeout: float) -> None:
         fout.seek(0); ferr.seek(0)
         stdout, stderr = fout.read(), ferr.read()
 
+    try:
+        from core.runlog import current_run
+        session = current_run()
+        if session is not None:
+            session.workers_dir.mkdir(parents=True, exist_ok=True)
+            (session.workers_dir / f"{rep.name}.stdout.log").write_text(stdout, encoding="utf-8")
+            if stderr.strip():
+                (session.workers_dir / f"{rep.name}.stderr.log").write_text(stderr, encoding="utf-8")
+    except Exception:
+        pass
+
     rep.ran = True
     rep.peak_ram_gb = peak / 1024 ** 3
     if reason == "oom":
@@ -363,13 +376,16 @@ def system_summary() -> dict:
 
 
 def print_system(info: dict) -> None:
-    print("=" * 78)
-    print(" RT-MASR model compatibility check")
-    print("=" * 78)
-    print(f" CPU    : {info['cpu']}  ({info['physical_cores']} cores / {info['logical_cores']} threads)")
-    print(f" RAM    : {info['ram_total_gb']} GB total, {info['ram_available_gb']} GB available now")
-    print(f" Python : {info['python']}   onnxruntime: {info['onnxruntime']}   PyTorch: {info['torch']}")
-    print("-" * 78)
+    logger.info("=" * 78)
+    logger.info(" RT-MASR model compatibility check")
+    logger.info("=" * 78)
+    logger.info(" CPU    : %s  (%s cores / %s threads)",
+                info["cpu"], info["physical_cores"], info["logical_cores"])
+    logger.info(" RAM    : %s GB total, %s GB available now",
+                info["ram_total_gb"], info["ram_available_gb"])
+    logger.info(" Python : %s   onnxruntime: %s   PyTorch: %s",
+                info["python"], info["onnxruntime"], info["torch"])
+    logger.info("-" * 78)
 
 
 def _fmt(v: Optional[float], spec: str, unit: str = "") -> str:
@@ -378,45 +394,46 @@ def _fmt(v: Optional[float], spec: str, unit: str = "") -> str:
 
 def print_table(reports: list[ModelReport]) -> None:
     head = f"{'Model':<24}{'Verdict':<16}{'Load':>7}{'Latency':>9}{'RTF':>6}{'Peak RAM':>10}{'Est. RAM':>10}"
-    print("\n" + head)
-    print("-" * len(head))
+    logger.info("\n%s", head)
+    logger.info("-" * len(head))
     for r in reports:
-        print(f"{r.name:<24}{r.status:<16}"
-              f"{_fmt(r.load_s, '.1f', 's'):>7}{_fmt(r.latency_s, '.2f', 's'):>9}"
-              f"{_fmt(r.rtf, '.2f'):>6}{_fmt(r.peak_ram_gb, '.1f', ' GB'):>10}"
-              f"{_fmt(r.est_ram_gb if r.downloaded else None, '.1f', ' GB'):>10}")
+        logger.info("%-24s%-16s%7s%9s%6s%10s%10s",
+                    r.name, r.status,
+                    _fmt(r.load_s, ".1f", "s"), _fmt(r.latency_s, ".2f", "s"),
+                    _fmt(r.rtf, ".2f"), _fmt(r.peak_ram_gb, ".1f", " GB"),
+                    _fmt(r.est_ram_gb if r.downloaded else None, ".1f", " GB"))
         if r.note:
-            print(f"    ↳ {r.note}")
+            logger.info("    ↳ %s", r.note)
 
 
 def recommend(reports: list[ModelReport]) -> None:
     ok = [r for r in reports if r.usable]
     rt = [r for r in ok if r.status == "REAL-TIME"]
-    print("\n" + "=" * 78)
-    print(" Recommendation")
-    print("=" * 78)
+    logger.info("\n%s", "=" * 78)
+    logger.info(" Recommendation")
+    logger.info("=" * 78)
     if not ok:
-        print(" No model could run on this machine. Check the notes above (download the")
-        print(" models, free up RAM, or try a smaller model such as whisper_int8_tiny).")
+        logger.info(" No model could run on this machine. Check the notes above (download the")
+        logger.info(" models, free up RAM, or try a smaller model such as whisper_int8_tiny).")
         return
     if rt:
         best = max(rt, key=lambda r: (r.quality, -(r.rtf or 9)))
         fast = min(rt, key=lambda r: r.rtf or 9)
         light = min(rt, key=lambda r: r.peak_ram_gb or 99)
-        print(f" Best accuracy that still keeps up live : {best.name}  (RTF {best.rtf:.2f})")
-        print(f" Fastest                                : {fast.name}  (RTF {fast.rtf:.2f})")
-        print(f" Lightest on RAM                        : {light.name}  ({light.peak_ram_gb:.1f} GB)")
-        print(f"\n Set it in config/config.yaml:  default_model: \"{best.name}\"")
-        print(f" or for one run:                RT_MASR_MODEL={best.name} uv run python main.py")
+        logger.info(" Best accuracy that still keeps up live : %s  (RTF %.2f)", best.name, best.rtf)
+        logger.info(" Fastest                                : %s  (RTF %.2f)", fast.name, fast.rtf)
+        logger.info(" Lightest on RAM                        : %s  (%.1f GB)", light.name, light.peak_ram_gb)
+        logger.info(" Set it in config/config.yaml:  default_model: \"%s\"", best.name)
+        logger.info(" or for one run:                RT_MASR_MODEL=%s uv run python main.py", best.name)
     else:
         slow = min(ok, key=lambda r: r.rtf or 99)
-        print(f" No model is comfortably real-time here. Closest: {slow.name} (RTF {slow.rtf:.2f}).")
-        print(" It is fine for transcribing files, but live calls will lag.")
+        logger.info(" No model is comfortably real-time here. Closest: %s (RTF %.2f).", slow.name, slow.rtf)
+        logger.info(" It is fine for transcribing files, but live calls will lag.")
     off = [r for r in ok if r.status in ("BORDERLINE", "OFFLINE ONLY")]
     if off and rt:
-        print("\n Usable for files only (too slow for live): " + ", ".join(r.name for r in off))
-    print("\n Note: RTF is for ONE stream on a ~10 s clip. Whisper live streaming re-decodes a")
-    print(" sliding window and concurrent calls share the CPU, so keep headroom (RTF <~ 0.3).")
+        logger.info(" Usable for files only (too slow for live): %s", ", ".join(r.name for r in off))
+    logger.info(" Note: RTF is for ONE stream on a ~10 s clip. Whisper live streaming re-decodes a")
+    logger.info(" sliding window and concurrent calls share the CPU, so keep headroom (RTF <~ 0.3).")
 
 
 def explain_skips(reports: list[ModelReport]) -> None:
@@ -452,19 +469,28 @@ def main() -> int:
     if args._worker:
         return worker_main(args)
 
+    from core.runlog import start_run
+    with start_run("check_models"):
+        code = _main(args)
+        if code:
+            sys.exit(code)
+        return 0
+
+
+def _main(args: argparse.Namespace) -> int:
     os.chdir(ROOT)
     registry = load_registry()
     if args.models:
         wanted = [m.strip() for m in args.models.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in {e["name"] for e in registry}]
         if unknown:
-            print(f"Unknown model(s): {unknown}. Available: {[e['name'] for e in registry]}")
+            logger.error("Unknown model(s): %s. Available: %s", unknown, [e["name"] for e in registry])
             return 1
         registry = [e for e in registry if e["name"] in wanted]
 
     audio = args.audio
     if not (ROOT / audio).is_file() and not Path(audio).is_file():
-        print(f"Test audio not found: {audio}")
+        logger.error("Test audio not found: %s", audio)
         return 1
     audio = str(Path(audio).resolve()) if Path(audio).is_file() else str(ROOT / audio)
 
@@ -490,23 +516,24 @@ def main() -> int:
             rep.status = "OK (not run)"
             rep.note = f"files present, ~{rep.est_ram_gb:.1f} GB RAM needed"
         else:
-            print(f"{tag}: loading + transcribing ...", flush=True)
+            logger.info("%s: loading + transcribing ...", tag)
             run_model(rep, audio, args.runs, args.timeout)
-            print(f"{tag}: {rep.status}" + (f"  (RTF {rep.rtf:.2f})" if rep.rtf else ""), flush=True)
+            extra = f"  (RTF {rep.rtf:.2f})" if rep.rtf else ""
+            logger.info("%s: %s%s", tag, rep.status, extra)
             continue
-        print(f"{tag}: {rep.status}", flush=True)
+        logger.info("%s: %s", tag, rep.status)
 
     explain_skips(reports)
     print_table(reports)
     if not args.no_run:
         recommend(reports)
     else:
-        print("\n(--no-run: nothing was executed, so no speed verdicts. Re-run without it to measure.)")
+        logger.info("(--no-run: nothing was executed, so no speed verdicts. Re-run without it to measure.)")
 
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"system": info, "audio": audio, "models": [asdict(r) for r in reports]}, indent=2))
-        print(f"\nJSON report written to {args.json}")
+        logger.info("JSON report written to %s", args.json)
 
     return 0 if any(r.usable or r.status == "OK (not run)" for r in reports) else 1
 

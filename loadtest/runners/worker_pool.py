@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 import psutil
 
+from src.core.runlog import configure_child_logging
+
 
 class InsufficientMemory(RuntimeError):
     """The requested process layout does not fit in the RAM that is free right now."""
@@ -46,6 +48,8 @@ def _worker_main(conn: Any, cfg: dict) -> None:
     """Entry point of one worker process."""
     os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(tempfile.gettempdir(), "numba_cache"))
     try:
+        if cfg.get("log_dir"):
+            configure_child_logging(cfg["log_dir"], f"worker-{cfg.get('index', os.getpid())}")
         cpus = cfg["cpus"]
         if cpus:
             os.sched_setaffinity(0, cpus)
@@ -115,6 +119,7 @@ class WorkerPool:
         reserve_mb:     RAM that must stay free for the rest of the system.
         hard_floor_mb:  if free RAM drops below this the workers are killed.
         startup_timeout_s: max time for one worker to load + warm up.
+        log_dir:        parent run directory; each worker writes workers/worker-N.log.
     """
 
     def __init__(
@@ -125,6 +130,7 @@ class WorkerPool:
         reserve_mb: float = 1500.0,
         hard_floor_mb: float = 600.0,
         startup_timeout_s: float = 600.0,
+        log_dir: Optional[str] = None,
     ) -> None:
         self.config_entry = config_entry
         self.cpu_groups = cpu_groups
@@ -132,6 +138,7 @@ class WorkerPool:
         self.reserve_mb = reserve_mb
         self.hard_floor_mb = hard_floor_mb
         self.startup_timeout_s = startup_timeout_s
+        self.log_dir = log_dir
         self._ctx = mp.get_context("spawn")
         self._procs: list[Any] = []
         self._conns: list[Any] = []
@@ -158,7 +165,8 @@ class WorkerPool:
     def _spawn(self, index: int) -> None:
         parent, child = self._ctx.Pipe()
         cfg = {"index": index, "cpus": self.cpu_groups[index],
-               "config_entry": self.config_entry, "runner": self.runner_cfg}
+               "config_entry": self.config_entry, "runner": self.runner_cfg,
+               "log_dir": self.log_dir}
         proc = self._ctx.Process(target=_worker_main, args=(child, cfg), daemon=True)
         proc.start()
         child.close()

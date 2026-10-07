@@ -14,6 +14,7 @@ overload aborts, and every leg produced a transcript.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -134,9 +135,12 @@ def run_ramp(
     confirm: bool = True,
     max_confirm_steps: int = 2,
     base_rss_mb: float = 0.0,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] | None = None,
 ) -> RampResult:
     """Run the ramp on an already-started pool. Never raises for expected stop conditions."""
+    if log is None:
+        _lg = logging.getLogger("rtmasr.loadtest")
+        log = _lg.info
     ramp = RampResult()
     mem = _MemoryModel(assumed_mb_per_leg)
     if base_rss_mb:

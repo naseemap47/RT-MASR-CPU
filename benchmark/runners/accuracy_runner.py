@@ -10,9 +10,12 @@ Reference entries come from benchmark/data/references.yaml:
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger("rtmasr.benchmark.accuracy")
 
 from benchmark.metrics.asr_metrics import normalise, wer, cer, wer_counts, cer_counts
 
@@ -74,15 +77,15 @@ class AccuracyRunner:
             reference_text = ref.get("text", "")
 
             if not os.path.exists(audio_file):
-                print(f"  [accuracy] SKIP missing: {audio_file}")
+                logger.warning("[accuracy] SKIP missing: %s", audio_file)
                 continue
 
-            print(f"  [accuracy] {audio_file} ({lang}, {metric})")
+            logger.info("[accuracy] %s (%s, %s)", audio_file, lang, metric)
             try:
                 result = self.engine.transcribe(audio_file)
                 hypothesis = result.get("text", "") or ""
             except Exception as exc:
-                print(f"  [accuracy] ERROR on {audio_file}: {exc}")
+                logger.error("[accuracy] ERROR on %s: %s", audio_file, exc)
                 continue
 
             norm_hyp = normalise(hypothesis, lang)

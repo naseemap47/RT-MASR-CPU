@@ -135,6 +135,7 @@ tests/                      Server / session / streaming tests
 models/                     Downloaded weights (git-ignored)
 test_audio/{en,cn,id}/      Test WAV files (git-ignored)
 docs/                       Architecture, changelog, benchmark and load-test docs
+logs/                       Per-run capture (git-ignored): logs/<pipeline>/<UTC>/
 ```
 
 ---
@@ -473,6 +474,30 @@ uv run pytest                                   # all of tests/ (needs models + 
 `tests/test_stream_realtime.py` load the configured model and read
 `test_audio/`. `test_full_stream.py` still points at the old flat path
 `test_audio/librispeech_0_1089_0.wav`.
+
+---
+
+## Logs
+
+Every pipeline run writes a directory under `logs/<pipeline>/<UTC stamp>/`:
+
+| Pipeline | Command |
+|---|---|
+| `server` | `uvicorn main:app` / `python main.py` |
+| `benchmark` | `benchmark/run_benchmark.py` |
+| `loadtest` | `loadtest/run_loadtest.py` |
+| `sizing` | `loadtest/run_sizing.py` |
+| `download` | `src/utils/download_utils.py` |
+| `check_models` | `src/utils/check_models.py` |
+
+Each directory has `run.log` (console + Python logging) and `run.meta.json` (argv, pid, duration, exit code, paths of result files). The UTC stamp is the same one on `benchmark/results/` and `loadtest/results/` filenames. `logs/<pipeline>/latest` is a symlink to the newest run. Load-test workers and `check_models` child processes add files under `workers/`.
+
+```bash
+ls logs/loadtest/latest/
+# run.log  run.meta.json
+```
+
+`RT_MASR_LOG_DIR` overrides the logs root, `RT_MASR_LOG_LEVEL=DEBUG` raises verbosity, `RT_MASR_NO_LOG=1` disables file capture. The live server also reads `server.log_level` from `config/config.yaml`. Pytest does not create log dirs.
 
 ---
 

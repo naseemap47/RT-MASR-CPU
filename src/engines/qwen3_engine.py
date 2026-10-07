@@ -51,6 +51,7 @@ forward call.  This is slower than ONNX on CPU but architecturally correct.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -62,6 +63,8 @@ import torch
 
 from qwen_asr import Qwen3ASRModel
 from core.config import load_config, get_dtype
+
+logger = logging.getLogger("rtmasr.engines.qwen3")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -233,7 +236,7 @@ class _Qwen3Pipeline:
         max_inference_batch_size: int = 1,
         max_new_tokens: int = 256,
     ):
-        print(f"Loading Transformers model: {model_id} ...")
+        logger.info("Loading Transformers model: %s ...", model_id)
         t0 = time.time()
         self.model = Qwen3ASRModel.from_pretrained(
             pretrained_model_name_or_path=model_id,
@@ -244,8 +247,9 @@ class _Qwen3Pipeline:
         )
         self._default_max_new_tokens = max_new_tokens
         self._timer = _StageTimer(getattr(self.model, "model", None))
-        print(f"Model loaded in {time.time() - t0:.1f}s"
-              f" (stage timing: {'measured via hooks' if self._timer.available else 'estimated'})")
+        logger.info("Model loaded in %.1fs (stage timing: %s)",
+                    time.time() - t0,
+                    "measured via hooks" if self._timer.available else "estimated")
 
     # ------------------------------------------------------------------
     # Single-chunk transcription
@@ -369,7 +373,7 @@ class _Qwen3Pipeline:
             return result
 
         # Multiple chunks
-        print(f"  Audio {audio_duration_s:.1f}s -> {len(chunks)} sub-chunks")
+        logger.info("  Audio %.1fs -> %s sub-chunks", audio_duration_s, len(chunks))
         texts: list[str] = []
         total_tokens = 0
         detected_lang = language or ""
@@ -379,8 +383,8 @@ class _Qwen3Pipeline:
             t0 = time.time()
             chunk_result = self._transcribe_chunk(chunk_wav, language, max_new_tokens)
             chunk_rtf = (time.time() - t0) / chunk_dur if chunk_dur > 0 else 0.0
-            print(f"    Sub-chunk {i+1}/{len(chunks)} ({chunk_dur:.1f}s): "
-                  f"{len(chunk_result['text'])} chars (RTF={chunk_rtf:.2f})")
+            logger.info("    Sub-chunk %s/%s (%.1fs): %s chars (RTF=%.2f)",
+                        i + 1, len(chunks), chunk_dur, len(chunk_result["text"]), chunk_rtf)
             texts.append(chunk_result["text"].strip())
             total_tokens += chunk_result["timing"]["tokens_generated"]
             if not detected_lang and chunk_result["language"]:

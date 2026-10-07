@@ -61,6 +61,7 @@ config/
   models/*.yaml              per-model settings (download, engine, inference, streaming, ort_session)
 src/
   core/config.py             YAML loading + registry resolution (config.yaml -> models.yaml -> model yaml)
+  core/runlog.py             per-run log session: logs/<pipeline>/<UTC>/run.log + metadata
   engines/
     live_call_session.py     per-call state: PCM normalisation, energy gate, VAD boundary, T0-T3 timestamps, metrics
     qwen3_onnx_engine.py     Qwen3-ASR on ONNX Runtime (mel -> encoder -> prompt -> prefill -> greedy decode)
@@ -75,6 +76,7 @@ src/
 benchmark/                   offline benchmark (see section 7)
 loadtest/                    load test + sizing (see section 8)
 tests/                       server/session/streaming tests
+logs/                        per-run capture: logs/<pipeline>/<UTC>/run.log + run.meta.json
 docs/                        architecture, benchmark, load test, deployment, this guide
 ```
 
@@ -792,7 +794,8 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b --runs 1 
 uv run python loadtest/run_loadtest.py --list              # list load-test runs (model x profile)
 uv run python loadtest/run_loadtest.py --levels 1,2 --duration 15 --models whisper_int8_tiny --cpus 4
 uv run python loadtest/run_sizing.py                       # build a sizing guide from the newest raw result
-uv run pytest benchmark/tests loadtest/tests tests/test_live_call_session.py
+ls logs/loadtest/latest/                                   # console capture of the last load-test run
+uv run pytest benchmark/tests loadtest/tests tests/test_live_call_session.py tests/test_runlog.py
 ```
 
 ### Where to change things

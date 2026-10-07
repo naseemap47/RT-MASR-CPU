@@ -225,3 +225,7 @@ loadtest/results/*.json
 loadtest/results/*.md
 *.jpg
 *.txt
+
+# Per-run logs (keep the empty tree)
+logs/*
+!logs/.gitkeep

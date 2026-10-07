@@ -21,6 +21,7 @@ flowchart TD
     LOOP -->|done| REP["Reporters"]
     REP --> J["benchmark/results/{UTC}_raw.json"]
     REP --> M["benchmark/results/{UTC}_summary.md"]
+    REP --> L["logs/benchmark/{UTC}/run.log"]
 ```
 
 The engine loaded in stage 1 is reused for stages 2–4. If one stage fails, that

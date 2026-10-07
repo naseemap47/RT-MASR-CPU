@@ -14,7 +14,7 @@
 server:
   host: "0.0.0.0"
   port: 8000
-  log_level: "info"
+  log_level: "info"    # DEBUG / INFO / WARNING / ERROR; override with RT_MASR_LOG_LEVEL
 
 # Active model — must match a "name" entry in config/models/models.yaml registry.
 #

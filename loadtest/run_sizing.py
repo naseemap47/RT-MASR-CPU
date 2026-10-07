@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,9 +25,12 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from loadtest.sizing.model import SizingAssumptions, load_raw_files, to_jsonable
 from loadtest.sizing.report import render_sizing_guide
+from src.core.runlog import start_run
+
+logger = logging.getLogger("rtmasr.sizing")
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Capacity sizing from load-test data", epilog=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input", nargs="*", default=None, help="Raw load-test JSON file(s); default: newest in loadtest/results")
@@ -40,8 +44,10 @@ def main() -> None:
     p.add_argument("--os-reserve-gb", type=float, default=d.os_reserve_gb)
     p.add_argument("--ram-headroom", type=float, default=d.ram_headroom)
     p.add_argument("--legs", default=",".join(str(x) for x in d.targets), help="Concurrent-leg targets")
-    args = p.parse_args()
+    return p.parse_args()
 
+
+def _run(args: argparse.Namespace, run) -> None:
     files = args.input or sorted(Path(args.results_dir).glob("*_loadtest_raw.json"))[-1:]
     if not files:
         sys.exit(f"No *_loadtest_raw.json in {args.results_dir}. Run loadtest/run_loadtest.py first.")
@@ -58,12 +64,22 @@ def main() -> None:
 
     out_dir = Path(args.output_dir or args.results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = run.stamp if run is not None else datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     md, js = out_dir / f"{stamp}_sizing_guide.md", out_dir / f"{stamp}_sizing.json"
     md.write_text(text, encoding="utf-8")
     js.write_text(json.dumps({"assumptions": to_jsonable(a), "models": to_jsonable(data)}, indent=2), encoding="utf-8")
-    print(text)
-    print(f"\n✓ Sizing guide: {md}\n✓ Sizing data : {js}")
+    if run is not None:
+        run.note_artifact("sizing_guide", md)
+        run.note_artifact("sizing_json", js)
+    logger.info("%s", text)
+    logger.info("Sizing guide: %s", md)
+    logger.info("Sizing data : %s", js)
+
+
+def main() -> None:
+    args = parse_args()
+    with start_run("sizing") as run:
+        _run(args, run)
 
 
 if __name__ == "__main__":

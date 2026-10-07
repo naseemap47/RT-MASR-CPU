@@ -29,12 +29,15 @@ kept up          p95 staleness and end lag both <= ``lag_threshold_s`` and no er
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger("rtmasr.benchmark.stream_conc")
 
 import numpy as np
 
@@ -259,7 +262,7 @@ class StreamingConcurrencyRunner:
                     update = streamer.step()
                 except Exception as exc:
                     res.errors += 1
-                    print(f"    [stream-conc] leg {leg} pass failed: {exc}")
+                    logger.error("[stream-conc] leg %s pass failed: %s", leg, exc)
                     continue
                 t_e = time.perf_counter()
                 if update is None:          # silence, nothing to transcribe
@@ -278,7 +281,7 @@ class StreamingConcurrencyRunner:
                 except Exception as exc:
                     res.errors += 1
                     update = None
-                    print(f"    [stream-conc] leg {leg} finish failed: {exc}")
+                    logger.error("[stream-conc] leg %s finish failed: %s", leg, exc)
                 t_e = time.perf_counter()
                 if update is not None and update.window_s > 0:
                     record(t_s, t_e, update.window_s, n - 1)
@@ -306,7 +309,7 @@ class StreamingConcurrencyRunner:
                     deltas = self._qwen_infer(engine, audio)
                 except Exception as exc:
                     res.errors += 1
-                    print(f"    [stream-conc] leg {leg} pass failed: {exc}")
+                    logger.error("[stream-conc] leg %s pass failed: %s", leg, exc)
                     continue
                 t_e = time.perf_counter()
                 record(t_s, t_e, len(audio) / SAMPLE_RATE, k)
@@ -327,7 +330,7 @@ class StreamingConcurrencyRunner:
                 except Exception as exc:
                     res.errors += 1
                     deltas = []
-                    print(f"    [stream-conc] leg {leg} final pass failed: {exc}")
+                    logger.error("[stream-conc] leg %s final pass failed: %s", leg, exc)
                 t_done = time.perf_counter()
                 record(t_s, t_done, len(audio) / SAMPLE_RATE, n - 1)
                 if deltas:
@@ -372,8 +375,8 @@ class StreamingConcurrencyRunner:
         stagger = self.stagger_s if stagger_s is None else stagger_s
         idx = [leg_offset + i for i in range(n_legs)]
         paths = [self.audio_files[g % len(self.audio_files)] for g in idx]
-        print(f"  [stream-conc] {n_legs} leg(s) streaming concurrently "
-              f"({self.stream_mode}, {self.chunk_s}s chunks, pace x{self.pace:g})")
+        logger.info("[stream-conc] %s leg(s) streaming concurrently (%s, %ss chunks, pace x%g)",
+                    n_legs, self.stream_mode, self.chunk_s, self.pace)
 
         legs: list[StreamLegResult] = []
         wall_start = time.perf_counter()
@@ -388,7 +391,7 @@ class StreamingConcurrencyRunner:
                     try:
                         return self._stream_leg(engine, idx[i], path, waves[path], base + idx[i] * stagger)
                     except Exception as exc:
-                        print(f"    [stream-conc] leg {idx[i]} crashed: {exc}")
+                        logger.error("[stream-conc] leg %s crashed: %s", idx[i], exc)
                         return StreamLegResult(leg=idx[i], audio_file=path,
                                                audio_s=len(waves[path]) / SAMPLE_RATE, errors=1)
                 legs = list(executor.map(_run, range(n_legs)))
@@ -432,11 +435,11 @@ class StreamingConcurrencyRunner:
         for p in needed - set(self._waves):      # decode up front so file I/O never counts against a leg
             self._waves[p] = np.asarray(self.audio_loader(p), dtype=np.float32)
         if self.warmup and self._waves:
-            print("  [stream-conc] warm-up pass (not timed)")
+            logger.info("[stream-conc] warm-up pass (not timed)")
             try:
                 self._warmup(engine, next(iter(self._waves.values())))
             except Exception as exc:
-                print(f"    [stream-conc] warm-up error: {exc}")
+                logger.error("[stream-conc] warm-up error: %s", exc)
             self.warmup = False
 
     def run_level(

@@ -437,6 +437,9 @@ uv run python loadtest/run_sizing.py --input loadtest/results/<dense>_loadtest_r
 uv run python loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --legs 50,100,1000
 ```
 
+- **Models:** add an `id` under `models:` in `loadtest/configs/loadtest_config.yaml`. The id must already exist in
+  `benchmark/configs/bench_config.yaml` (that file maps id → backend and model YAML). `--models` only selects from that
+  roster.
 - **Profiles:** `dense` (about 85% speech, stress) and `conversational` (about 47% speech, planning case).
 - **Saturation point:** the highest leg count where every leg keeps p95 staleness and end-of-call lag within
   `slo.lag_threshold_s` (2 s by default), found by ramp, bisect and confirm.

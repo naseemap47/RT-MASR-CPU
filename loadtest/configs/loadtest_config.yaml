@@ -7,7 +7,7 @@
 # engine at real-time pace with the live server's stream logic.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Engine definitions (backend, model yaml) are reused from the benchmark config.
+# Engine definitions: this file lists ids; bench_config.yaml maps each id to backend + model yaml.
 bench_config: "benchmark/configs/bench_config.yaml"
 
 # What one simulated call looks like.

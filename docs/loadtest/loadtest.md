@@ -53,6 +53,11 @@ Each **model × load profile** is one run: pin **all logical CPUs** of this mach
 legs until they no longer keep up. That saturation point is the measurement. Thread pinning uses sibling pairs (both SMT
 threads of a physical core). `--cpus N` / `--processes P` can shrink a smoke run; they do not build a matrix of layouts.
 
+**Which models:** `loadtest/configs/loadtest_config.yaml` `models:` is the roster (ids only). Each `id` must already exist
+in `benchmark/configs/bench_config.yaml` — that file maps the id to `backend` and `model_config` YAML. `--models a,b`
+selects a subset of the roster; it does not add an id that is missing from `loadtest_config.yaml`. Download weights
+before running (`src/utils/download_utils.py`).
+
 ## Safety on a shared machine
 
 The pool starts workers one at a time and checks RSS against free RAM (`InsufficientMemory` -> scenario skipped and reported), a hard floor kills

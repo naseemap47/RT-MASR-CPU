@@ -116,8 +116,8 @@ python3 loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fr
 | `--spare-fraction` | 0.10 | 0.2 | add 20% spare boxes (at least one) |
 | `--legs` | 50,60,100,200,500,1000 | 50,100,1000 | targets to size |
 
-With the laptop's conversational saturation points (Whisper tiny `l_sat = 3`, Qwen3-0.6B `l_sat = 1`, run
-`20261007T170448Z`):
+With the laptop's conversational saturation points (Whisper tiny `l_sat = 3`, Qwen3-0.6B INT8 and INT4 `l_sat = 1`, final run
+`20261007T202154Z`):
 
 ```
 Whisper: legs/box = max(1, 3 x 0.6 / 1.25) = 1.44      (defaults: 3 x 0.70 / 1.10 = 1.91)
@@ -160,4 +160,4 @@ uv run --offline python -m pytest loadtest/tests benchmark/tests -q
 ## Limitations (short)
 
 One laptop-class edge CPU, noisy shared machine, 1-leg resolution, clean read-speech only, no network path, scale-out beyond one box
-assumed rather than measured, 30 s calls. See section 6 of the sizing guide.
+assumed rather than measured, 30 s calls. See section 7 of [`sizing_guide.md`](sizing_guide.md) and section 6 of [`final_result.md`](final_result.md).

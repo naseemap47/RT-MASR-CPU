@@ -616,4 +616,4 @@ python3 docs/report/make_figures.py                      # figures for this repo
 
 Related documents: [`../arch/architecture.md`](../arch/architecture.md) (POC internals), [`../how-streaming-works.md`](../how-streaming-works.md),
 [`../benchmark/benchmarking.md`](../benchmark/benchmarking.md), [`../loadtest/loadtest.md`](../loadtest/loadtest.md),
-[`../deployment.md`](../deployment.md) (production design).
+[`../loadtest/sizing_guide.md`](../loadtest/sizing_guide.md) (sizing for 50-1,000 legs), [`../deployment.md`](../deployment.md) (production design).

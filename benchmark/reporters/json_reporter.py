@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.core.runlog import get_logger
+
+logger = get_logger("benchmark.reporter")
 
 
 def to_serialisable(obj: Any) -> Any:
@@ -47,9 +50,10 @@ class JsonReporter:
         output_dir: Directory where JSON files are written (created if needed).
     """
 
-    def __init__(self, output_dir: str) -> None:
+    def __init__(self, output_dir: str, stamp: str | None = None) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.stamp = stamp or datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     def save(self, results: Any) -> str:
         """
@@ -61,8 +65,7 @@ class JsonReporter:
         Returns:
             Absolute path to the written JSON file.
         """
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"{timestamp}_raw.json"
+        filename = f"{self.stamp}_raw.json"
         path = self.output_dir / filename
 
         serialisable = to_serialisable(results)
@@ -70,5 +73,5 @@ class JsonReporter:
             # default=str: never lose a whole run to one non-JSON value (e.g. a numpy float)
             json.dump(serialisable, f, indent=2, ensure_ascii=False, default=_json_default)
 
-        print(f"  [reporter] Raw JSON saved: {path}")
+        logger.info("Raw JSON saved: %s", path)
         return str(path.resolve())

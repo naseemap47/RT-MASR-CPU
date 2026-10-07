@@ -31,6 +31,7 @@ Usage:
 """
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Optional, Literal, Generator, Union
@@ -43,6 +44,8 @@ from utils.audio_utils import (
     get_feat_extract_output_lengths, find_silence_split_points
 )
 from core.config import load_config
+
+logger = logging.getLogger("rtmasr.engines.qwen3_onnx")
 
 
 def _ort_graph_opt(level_str: str) -> ort.GraphOptimizationLevel:
@@ -184,15 +187,15 @@ class OnnxAsrPipeline:
                 quant_path = onnx_path / f"{name}{suffix}.onnx"
                 if quant_path.exists():
                     return quant_path
-                print(f"  [warn] {quant_path.name} not found - falling back to {name}.onnx (FP32)")
+                logger.warning("%s not found - falling back to %s.onnx (FP32)", quant_path.name, name)
             return onnx_path / f"{name}.onnx"
 
         def load(path: Path) -> ort.InferenceSession:
-            print(f"  {path.name}")
+            logger.info("  %s", path.name)
             return ort.InferenceSession(str(path), sess_opts, providers=providers)
 
         self.layout = "split" if (onnx_path / "encoder_conv.onnx").exists() else "fused"
-        print(f"Loading ONNX models (layout: {self.layout}, precision: {quantize.upper()})...")
+        logger.info("Loading ONNX models (layout: %s, precision: %s)...", self.layout, quantize.upper())
 
         if self.layout == "split":
             # Legacy layout: only the decoder is quantised (INT8).
@@ -223,12 +226,12 @@ class OnnxAsrPipeline:
             tokenizer_path = None
         self.tokenizer = SimpleTokenizer(str(tokenizer_path) if tokenizer_path else None)
 
-        print("Pipeline ready.")
+        logger.info("Pipeline ready.")
 
     def _load_embeddings(self, onnx_path: Path) -> np.ndarray:
         """Load embed_tokens.bin as [vocab, hidden] (FP32 for split layout, per config.json otherwise)."""
         embed_path = onnx_path / "embed_tokens.bin"
-        print(f"Loading embeddings ({embed_path.stat().st_size / 1e6:.0f} MB)...")
+        logger.info("Loading embeddings (%.0f MB)...", embed_path.stat().st_size / 1e6)
 
         cfg_path = onnx_path / "config.json"
         if self.layout == "split" or not cfg_path.exists():
@@ -479,7 +482,7 @@ class OnnxAsrPipeline:
         # Long audio — VAD chunking
         boundaries = [0] + split_points + [len(wav)]
         num_chunks = len(boundaries) - 1
-        print(f"  Audio {audio_duration:.1f}s → {num_chunks} sub-chunks (split at silence)")
+        logger.info("  Audio %.1fs → %s sub-chunks (split at silence)", audio_duration, num_chunks)
 
         texts = []
         total_tokens = 0
@@ -494,8 +497,8 @@ class OnnxAsrPipeline:
 
             chunk_rtf = (time.time() - t0) / chunk_dur
             chunk_chars = len(chunk_result["text"])
-            print(f"    Sub-chunk {i+1}/{num_chunks} ({chunk_dur:.1f}s): "
-                  f"{chunk_chars} chars (RTF={chunk_rtf:.2f})")
+            logger.info("    Sub-chunk %s/%s (%.1fs): %s chars (RTF=%.2f)",
+                        i + 1, num_chunks, chunk_dur, chunk_chars, chunk_rtf)
 
             texts.append(chunk_result["text"].strip())
             total_tokens += chunk_result["timing"]["tokens_generated"]
@@ -694,7 +697,7 @@ class ONNXQwen3ASR:
         infer_cfg    = cfg.get("inference", {})
         ort_cfg      = cfg.get("ort_session", {})
 
-        return cls(
+        engine = cls(
             onnx_dir       = engine_cfg.get("onnx_dir",     "models/qwen3-asr-onnx-0.6b-int8"),
             num_threads    = engine_cfg.get("num_threads",  0),
             quantize       = engine_cfg.get("quantize",     "int8"),
@@ -703,6 +706,15 @@ class ONNXQwen3ASR:
             max_new_tokens = infer_cfg.get("max_new_tokens", 512),
             chunk_sec      = infer_cfg.get("chunk_sec",      30),
         )
+        try:
+            try:
+                from src.core.observe import annotate_from_config
+            except ImportError:
+                from core.observe import annotate_from_config
+            annotate_from_config(engine, cfg, quantize=engine_cfg.get("quantize"))
+        except Exception:
+            pass
+        return engine
 
     @classmethod
     def from_config_path(cls, config_path: str) -> "ONNXQwen3ASR":
@@ -731,6 +743,23 @@ class ONNXQwen3ASR:
         language: Optional[str] = None,
     ) -> dict:
         lang = normalize_language(language) if language is not None else self.language
+        try:
+            try:
+                from src.core.observe import audio_inputs, record_asr, span, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, record_asr, span, use_engine
+            use_engine(self)
+            with span("transcribe", "llm", inputs=audio_inputs(audio_path, language=lang)) as sp:
+                result = self.pipeline.transcribe(
+                    audio_path,
+                    lang,
+                    max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
+                    chunk_sec      if chunk_sec      is not None else self._default_chunk_sec,
+                )
+                record_asr(sp, result)
+                return result
+        except ImportError:
+            pass
         return self.pipeline.transcribe(
             audio_path,
             lang,
@@ -750,11 +779,22 @@ class ONNXQwen3ASR:
         ``OnnxAsrPipeline.transcribe_stream`` for the full contract.
         """
         lang = normalize_language(language) if language is not None else self.language
-        yield from self.pipeline.transcribe_stream(
+        gen = self.pipeline.transcribe_stream(
             audio,
             lang,
             max_new_tokens if max_new_tokens is not None else self._default_max_new_tokens,
         )
+        try:
+            try:
+                from src.core.observe import audio_inputs, trace_stream, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, trace_stream, use_engine
+            use_engine(self)
+            yield from trace_stream(
+                "transcribe_stream", gen, inputs=audio_inputs(audio, language=lang),
+            )
+        except ImportError:
+            yield from gen
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

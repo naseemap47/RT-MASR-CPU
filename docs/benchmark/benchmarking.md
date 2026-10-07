@@ -21,6 +21,7 @@ flowchart TD
     LOOP -->|done| REP["Reporters"]
     REP --> J["benchmark/results/{UTC}_raw.json"]
     REP --> M["benchmark/results/{UTC}_summary.md"]
+    REP --> L["logs/benchmark/{UTC}/run.log + traces.jsonl"]
 ```
 
 The engine loaded in stage 1 is reused for stages 2–4. If one stage fails, that
@@ -97,7 +98,7 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_i
 | Flag | Effect |
 |---|---|
 | `--config PATH` | Alternative bench config |
-| `--models a,b` | Subset of config ids |
+| `--models a,b` | Subset of config ids (not registry names; an unknown id prints the valid ids, their registry names and whether each is downloaded) |
 | `--runs N` | Override `runs` |
 | `--legs 1,2,4,8` | Override `concurrency_legs` |
 | `--concurrency-mode stream\|batch` | Override `concurrency_mode` |
@@ -106,6 +107,12 @@ uv run python benchmark/run_benchmark.py --models qwen3_onnx_int8_0.6b,whisper_i
 | `--output-dir DIR` | Override `output_dir` |
 
 Exit code is `2` if any config failed, `1` for invalid arguments/inputs.
+
+Before any config runs, its weights are checked on disk. A config that is not
+downloaded prints the missing files and the command to fetch it
+(`uv run python src/utils/download_utils.py --model <registry name>`). In a
+default run it is skipped and the others continue; if it was named with
+`--models`, the run stops with exit code `1`.
 
 ---
 
@@ -419,6 +426,8 @@ generated `*_summary.md`.)
 |---|---|
 | `<UTC>_raw.json` | Every measurement, including raw per-run latencies, hardware fingerprint and run parameters |
 | `<UTC>_summary.md` | Hardware/software table, load, latency/RTF, CPU/memory, accuracy and concurrency tables (including *Concurrent live legs supported* in stream mode) |
+| `logs/benchmark/<UTC>/run.log` | Console + logging for that invocation (same UTC stamp) |
+| `logs/benchmark/<UTC>/traces.jsonl` | One JSON object per `transcribe` / `transcribe_stream` (stream-concurrency legs nest under a `call` chain) |
 
 Hardware fingerprint (`reporters/hardware_info.py`): CPU model, physical/logical
 cores, RAM, OS, Python and key library versions.

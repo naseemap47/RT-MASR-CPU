@@ -91,6 +91,7 @@ class LiveCallSession:
 
         # ── VAD / utterance state ──────────────────────────────────────────
         self.committed_text: str = ""   # finalised utterance transcripts
+        self._obs_span = None           # AI observability parent trace (call)
 
     # ──────────────────────────────────────────────────────────────────────
     # Internal helpers
@@ -121,6 +122,29 @@ class LiveCallSession:
         self._peak_rss_start_kb = self._rss_kb()
         self.committed_text = ""
         self._reset_input_format()
+        self._end_observe_trace()
+        try:
+            from src.core.observe import start_trace
+        except ImportError:
+            from core.observe import start_trace  # type: ignore
+        try:
+            self._obs_span = start_trace("call", tags=["call"])
+        except Exception:
+            self._obs_span = None
+
+    def _end_observe_trace(self, outputs: dict | None = None) -> None:
+        sp = getattr(self, "_obs_span", None)
+        if sp is None:
+            return
+        self._obs_span = None
+        try:
+            sp.finish(outputs=outputs)
+        except Exception:
+            pass
+
+    def mark_call_end(self, outputs: dict | None = None) -> None:
+        """Close the observability trace opened by mark_call_start."""
+        self._end_observe_trace(outputs)
 
     # ── Input format negotiation / normalisation ───────────────────────────
 

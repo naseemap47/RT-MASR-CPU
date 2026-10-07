@@ -35,10 +35,18 @@ Config-driven entrypoint
 
 Or to download all registered models in one call:
     downloader.download_all("config/config.yaml")
+
+Test audio
+----------
+    downloader.download_test_audio()
+        Fetches the test_audio/{en,cn,id}/*.wav clips from the HuggingFace
+        dataset repo naseemap47/RT-MASR-CPU into test_audio/, keeping the
+        folder layout.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import shutil
@@ -48,6 +56,10 @@ from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download
 
 from core.config import load_config, load_model_registry, load_server_config
+
+logger = logging.getLogger("rtmasr.download")
+
+TEST_AUDIO_REPO = "naseemap47/RT-MASR-CPU"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -106,10 +118,10 @@ class DownloadModels:
 
         missing = [f for f in _required if not (out_dir / f).exists()]
         if not missing and not force:
-            print(f"All required ONNX files already present in '{out_dir}'.")
+            logger.info("All required ONNX files already present in '%s'.", out_dir)
             return out_dir
 
-        print(f"Downloading ONNX model files from '{repo_id}' → '{out_dir}' ...")
+        logger.info("Downloading ONNX model files from '%s' → '%s' ...", repo_id, out_dir)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             snapshot_download(
@@ -122,7 +134,7 @@ class DownloadModels:
             if tokenizer_src.exists():
                 shutil.move(str(tokenizer_src), str(out_dir))
 
-        print(f"ONNX model ready in '{out_dir}'.")
+        logger.info("ONNX model ready in '%s'.", out_dir)
         return out_dir
 
     def download_hf_files(
@@ -167,14 +179,14 @@ class DownloadModels:
             return local.exists() and local.stat().st_size == sizes[f]
 
         if not dry_run and not force and all(_complete(f) for f in files):
-            print(f"All required files already present in '{out_dir}'.")
+            logger.info("All required files already present in '%s'.", out_dir)
             return out_dir
 
-        print(f"Repo:   {repo_id} @ {info.sha}")
-        print(f"Output: {out_dir}")
+        logger.info("Repo:   %s @ %s", repo_id, info.sha)
+        logger.info("Output: %s", out_dir)
         for f in files:
-            print(f"  {f:34s} {sizes[f] / 1e6:10.1f} MB")
-        print(f"  {'total':34s} {sum(sizes[f] for f in files) / 1e9:10.2f} GB")
+            logger.info("  %-34s %10.1f MB", f, sizes[f] / 1e6)
+        logger.info("  %-34s %10.2f GB", "total", sum(sizes[f] for f in files) / 1e9)
         if dry_run:
             return out_dir
 
@@ -190,7 +202,7 @@ class DownloadModels:
         bad = [f for f in files if not _complete(f)]
         if bad:
             raise RuntimeError(f"Download incomplete or size mismatch in '{out_dir}': {bad}")
-        print(f"Model ready in '{out_dir}'.")
+        logger.info("Model ready in '%s'.", out_dir)
         return out_dir
 
     def download_snapshot(
@@ -213,13 +225,75 @@ class DownloadModels:
         out_dir = Path(local_dir)
 
         if out_dir.exists() and any(out_dir.iterdir()) and not force:
-            print(f"Model snapshot already present in '{out_dir}'.")
+            logger.info("Model snapshot already present in '%s'.", out_dir)
             return out_dir
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Downloading snapshot from '{repo_id}' → '{out_dir}' ...")
+        logger.info("Downloading snapshot from '%s' → '%s' ...", repo_id, out_dir)
         snapshot_download(repo_id=repo_id, local_dir=str(out_dir))
-        print(f"Snapshot ready in '{out_dir}'.")
+        logger.info("Snapshot ready in '%s'.", out_dir)
+        return out_dir
+
+    def download_test_audio(
+        self,
+        repo_id: str = TEST_AUDIO_REPO,
+        target_dir: str = "test_audio",
+        force: bool = False,
+    ) -> Path:
+        """
+        Download the test audio folders from a HuggingFace dataset repo.
+
+        Every file inside a folder of the repo (``en/``, ``cn/``, ``id/``, ...)
+        is saved under *target_dir* with the same relative path. Files at the
+        repo root (``.gitattributes``, ``.gitignore``) are skipped so the local
+        ``test_audio/.gitignore`` is left alone. Files already present with the
+        size reported by the Hub are not downloaded again.
+
+        Args:
+            repo_id:    HuggingFace dataset repository ID.
+            target_dir: Local destination directory.
+            force:      Re-download every file even if it already exists.
+
+        Returns:
+            Path to *target_dir*.
+        """
+        out_dir = Path(target_dir)
+
+        info = HfApi().dataset_info(repo_id, files_metadata=True)
+        sizes = {s.rfilename: s.size or 0 for s in info.siblings if "/" in s.rfilename}
+        if not sizes:
+            raise FileNotFoundError(f"No audio folders found in dataset '{repo_id}'.")
+
+        def _complete(f: str) -> bool:
+            local = out_dir / f
+            return local.exists() and local.stat().st_size == sizes[f]
+
+        todo = sorted(sizes) if force else sorted(f for f in sizes if not _complete(f))
+        folders = ", ".join(sorted({f.split("/", 1)[0] for f in sizes}))
+        if not todo:
+            logger.info("All %d test audio files (%s) already present in '%s'.",
+                        len(sizes), folders, out_dir)
+            return out_dir
+
+        logger.info("Downloading %d test audio file(s) from dataset '%s' → '%s' ...",
+                    len(todo), repo_id, out_dir)
+        for f in todo:
+            logger.info("  %-40s %8.1f KB", f, sizes[f] / 1e3)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=info.sha,
+            allow_patterns=todo,
+            local_dir=str(out_dir),
+            force_download=force,
+        )
+
+        bad = [f for f in sizes if not _complete(f)]
+        if bad:
+            raise RuntimeError(f"Download incomplete or size mismatch in '{out_dir}': {bad}")
+        logger.info("Test audio ready in '%s' (%d files in %s).", out_dir, len(sizes), folders)
         return out_dir
 
     # ------------------------------------------------------------------
@@ -260,7 +334,7 @@ class DownloadModels:
         method = dl.get("method", "snapshot")
         name = cfg.get("display_name", model_config_path)
 
-        print(f"\n── {name} ({'method: ' + method}) ──")
+        logger.info("── %s (method: %s) ──", name, method)
 
         if method == "onnx":
             return self.download_onnx(
@@ -323,7 +397,7 @@ class DownloadModels:
         entries = load_model_registry(str(registry_path))
         results: dict[str, Path] = {}
 
-        print(f"Downloading {len(entries)} model(s) listed in '{registry_path}' ...")
+        logger.info("Downloading %s model(s) listed in '%s' ...", len(entries), registry_path)
         for entry in entries:
             model_name = entry["name"]
             model_cfg_path = cfg_dir / entry["config"]
@@ -331,7 +405,7 @@ class DownloadModels:
                 path = self.download_from_config(str(model_cfg_path), force=force, dry_run=dry_run)
                 results[model_name] = path
             except Exception as exc:
-                print(f"  [ERROR] Failed to download '{model_name}': {exc}")
+                logger.error("Failed to download '%s': %s", model_name, exc)
 
         return results
 
@@ -375,19 +449,19 @@ class DownloadModels:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if out_dir.exists() and any(out_dir.iterdir()) and not force:
-            print(f"Whisper ONNX ({precision}) files already present in '{out_dir}'.")
+            logger.info("Whisper ONNX (%s) files already present in '%s'.", precision, out_dir)
             return out_dir
 
         url = self._WHISPER_URLS[precision]
         tar_file = out_dir.parent / f"whisper_{precision}.tar.gz"
 
-        print(f"Downloading Whisper ONNX ({precision}) from '{url}' …")
+        logger.info("Downloading Whisper ONNX (%s) from '%s' …", precision, url)
         subprocess.run(["curl", "-L", url, "-o", str(tar_file)], check=True)
-        print(f"Extracting to '{out_dir}' …")
+        logger.info("Extracting to '%s' …", out_dir)
         subprocess.run(["tar", "-zxvf", str(tar_file), "-C", str(out_dir)], check=True)
         tar_file.unlink(missing_ok=True)
 
-        print(f"Whisper ONNX ({precision}) ready in '{out_dir}'.")
+        logger.info("Whisper ONNX (%s) ready in '%s'.", precision, out_dir)
         return out_dir
 
     # ------------------------------------------------------------------
@@ -417,6 +491,8 @@ class DownloadModels:
 if __name__ == "__main__":
     import argparse
 
+    from core.runlog import start_run
+
     parser = argparse.ArgumentParser(
         description="Download RT-MASR model weights (Qwen3-ASR and Whisper ONNX)."
     )
@@ -438,9 +514,18 @@ if __name__ == "__main__":
         help="Path to the top-level config.yaml (default: config/config.yaml).",
     )
     parser.add_argument(
+        "--test-audio",
+        action="store_true",
+        help=(
+            f"Download the test audio clips from the HuggingFace dataset '{TEST_AUDIO_REPO}' "
+            "into test_audio/. On its own it downloads no models; combine with --model "
+            "to fetch both."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-download even if model files already exist.",
+        help="Force re-download even if model / audio files already exist.",
     )
     parser.add_argument(
         "--dry-run",
@@ -449,41 +534,48 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    downloader = DownloadModels()
+    with start_run("download"):
+        downloader = DownloadModels()
 
-    # Shorthand whisper aliases — dash and underscore forms both accepted.
-    # Note: whisper_int8 / fp16 / fp32 are also full registry entries, so they
-    # will be resolved via the registry path below. The aliases here act as a
-    # fast-path that bypasses registry lookup for convenience.
-    _WHISPER_ALIASES = {
-        "whisper-int8": "int8",
-        "whisper-fp16": "fp16",
-        "whisper-fp32": "fp32",
-        "whisper_int8": "int8",
-        "whisper_fp16": "fp16",
-        "whisper_fp32": "fp32",
-    }
-    if args.model in _WHISPER_ALIASES:
-        precision = _WHISPER_ALIASES[args.model]
-        downloader.download_whisper(
-            target_dir=f"models/whisper_{precision}",
-            precision=precision,
-            force=args.force,
-        )
-    elif args.model:
-        # Resolve per-model config path from the registry
-        server_cfg = load_server_config(args.config)
-        cfg_dir = Path(args.config).parent.parent
-        registry_path = cfg_dir / server_cfg["model_registry"]
-        entries = load_model_registry(str(registry_path))
+        if args.test_audio:
+            downloader.download_test_audio(force=args.force)
 
-        entry = next((e for e in entries if e["name"] == args.model), None)
-        if entry is None:
-            available = [e["name"] for e in entries]
-            raise SystemExit(
-                f"Unknown model '{args.model}'. Available: {available}"
+        # Shorthand whisper aliases — dash and underscore forms both accepted.
+        # Note: whisper_int8 / fp16 / fp32 are also full registry entries, so they
+        # will be resolved via the registry path below. The aliases here act as a
+        # fast-path that bypasses registry lookup for convenience.
+        _WHISPER_ALIASES = {
+            "whisper-int8": "int8",
+            "whisper-fp16": "fp16",
+            "whisper-fp32": "fp32",
+            "whisper_int8": "int8",
+            "whisper_fp16": "fp16",
+            "whisper_fp32": "fp32",
+        }
+        if args.model in _WHISPER_ALIASES:
+            precision = _WHISPER_ALIASES[args.model]
+            downloader.download_whisper(
+                target_dir=f"models/whisper_{precision}",
+                precision=precision,
+                force=args.force,
             )
-        model_cfg_path = cfg_dir / entry["config"]
-        downloader.download_from_config(str(model_cfg_path), force=args.force, dry_run=args.dry_run)
-    else:
-        downloader.download_all(config_path=args.config, force=args.force, dry_run=args.dry_run)
+        elif args.model:
+            # Resolve per-model config path from the registry
+            server_cfg = load_server_config(args.config)
+            cfg_dir = Path(args.config).parent.parent
+            registry_path = cfg_dir / server_cfg["model_registry"]
+            entries = load_model_registry(str(registry_path))
+
+            entry = next((e for e in entries if e["name"] == args.model), None)
+            if entry is None:
+                from core.model_check import registry_table, report, unknown_name_panel
+                report(logger, unknown_name_panel(
+                    "model", [args.model], [e["name"] for e in entries], registry_table(entries),
+                    where="--model",
+                    hints=["Download one model (or omit --model to download all of them):",
+                           "$ uv run python src/utils/download_utils.py --model <name>"]))
+                raise SystemExit(1)
+            model_cfg_path = cfg_dir / entry["config"]
+            downloader.download_from_config(str(model_cfg_path), force=args.force, dry_run=args.dry_run)
+        elif not args.test_audio:
+            downloader.download_all(config_path=args.config, force=args.force, dry_run=args.dry_run)

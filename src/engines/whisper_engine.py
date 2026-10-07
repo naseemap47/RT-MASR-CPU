@@ -32,6 +32,7 @@ Drop-in integration::
 """
 
 import io
+import logging
 import os
 import sys
 import time
@@ -44,6 +45,8 @@ import onnx
 import onnxruntime as ort
 import psutil
 from onnx.serialization import ProtoSerializer
+
+logger = logging.getLogger("rtmasr.engines.whisper")
 
 # ── suppress noisy runtime warnings ────────────────────────────────────────
 warnings.simplefilter("ignore", FutureWarning)
@@ -169,7 +172,7 @@ def _load_onnx(
             f"  Available precisions: {AVAILABLE_PRECISIONS}"
         )
 
-    print(f"  [whisper_engine] Loading: {path}")
+    logger.info("Loading: %s", path)
     serializer: ProtoSerializer = onnx._get_serializer(fmt="protobuf")
     graph = onnx.load(path)
     return serializer.serialize_proto(proto=graph)
@@ -389,7 +392,7 @@ class WhisperOnnxPipeline:
         providers = ["CPUExecutionProvider"]
 
         # ── Encoder ─────────────────────────────────────────────────────────
-        print(f"[whisper_engine] Loading {model_name} encoder ({precision}) …")
+        logger.info("Loading %s encoder (%s) …", model_name, precision)
         enc_bytes = _load_onnx(f"{model_name}_encoder", model_dir, precision)
         self._encoder = ort.InferenceSession(
             path_or_bytes=enc_bytes,
@@ -402,7 +405,7 @@ class WhisperOnnxPipeline:
         }
 
         # ── Decoder ─────────────────────────────────────────────────────────
-        print(f"[whisper_engine] Loading {model_name} decoder ({precision}) …")
+        logger.info("Loading %s decoder (%s) …", model_name, precision)
         dec_bytes = _load_onnx(f"{model_name}_decoder", model_dir, precision)
         self._decoder = ort.InferenceSession(
             path_or_bytes=dec_bytes,
@@ -418,7 +421,7 @@ class WhisperOnnxPipeline:
         # real request does not pay ~2 s of import / tokenizer-load time.
         self._warm_decoding_stack()
 
-        print(f"[whisper_engine] Pipeline ready  model={model_name}  precision={precision}.")
+        logger.info("Pipeline ready  model=%s  precision=%s.", model_name, precision)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -687,7 +690,7 @@ class WhisperOnnxEngine:
         """
         engine_cfg = cfg.get("engine", {})
         infer_cfg  = cfg.get("inference", {})
-        return cls(
+        engine = cls(
             model_name  = engine_cfg.get("model_name",  "small"),
             model_dir   = engine_cfg.get("model_dir",   "."),
             precision   = engine_cfg.get("precision",   "int8"),
@@ -697,6 +700,16 @@ class WhisperOnnxEngine:
             beam_size   = infer_cfg.get("beam_size",    DEFAULT_BEAM_SIZE),
             temperature = infer_cfg.get("temperature",  DEFAULT_TEMPERATURE),
         )
+        try:
+            try:
+                from src.core.observe import annotate_from_config
+            except ImportError:
+                from core.observe import annotate_from_config
+            annotate_from_config(engine, cfg, precision=engine_cfg.get("precision"),
+                                 whisper_model=engine_cfg.get("model_name"))
+        except Exception:
+            pass
+        return engine
 
     @classmethod
     def from_config_path(cls, config_path: str) -> "WhisperOnnxEngine":
@@ -751,15 +764,27 @@ class WhisperOnnxEngine:
             language  – detected / forced language code
             timing    – mel_s / encoder_s / decode_s / other_s breakdown, total_s, RTF
         """
-        return self.pipeline.transcribe(
-            audio       = audio,
-            language    = language if language is not None else self.language,
-            task        = task,
-            beam_size   = beam_size if beam_size is not None else self.beam_size,
-            temperature = self.temperature,
-            verbose     = verbose,
-            fallback    = fallback,
+        lang = language if language is not None else self.language
+        kwargs = dict(
+            audio=audio, language=lang, task=task,
+            beam_size=beam_size if beam_size is not None else self.beam_size,
+            temperature=self.temperature, verbose=verbose, fallback=fallback,
         )
+        try:
+            try:
+                from src.core.observe import audio_inputs, record_asr, span, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, record_asr, span, use_engine
+            use_engine(self)
+            with span("transcribe", "llm",
+                      inputs=audio_inputs(audio, language=lang, beam_size=kwargs["beam_size"],
+                                          fallback=fallback)) as sp:
+                result = self.pipeline.transcribe(**kwargs)
+                record_asr(sp, result)
+                return result
+        except ImportError:
+            pass
+        return self.pipeline.transcribe(**kwargs)
 
     def transcribe_stream(
         self,
@@ -790,7 +815,24 @@ class WhisperOnnxEngine:
         verbose:  Print timestamps to stdout during decode.
         """
         t_start = time.time()
+        lang = language if language is not None else self.language
 
+        def _stream():
+            yield from self._transcribe_stream_body(audio, lang, verbose, t_start)
+
+        try:
+            try:
+                from src.core.observe import audio_inputs, trace_stream, use_engine
+            except ImportError:
+                from core.observe import audio_inputs, trace_stream, use_engine
+            use_engine(self)
+            yield from trace_stream(
+                "transcribe_stream", _stream(), inputs=audio_inputs(audio, language=lang),
+            )
+        except ImportError:
+            yield from _stream()
+
+    def _transcribe_stream_body(self, audio, lang, verbose, t_start):
         if isinstance(audio, (str, Path)):
             wav = _load_audio(str(audio))
         elif isinstance(audio, np.ndarray):
@@ -802,7 +844,7 @@ class WhisperOnnxEngine:
 
         result = self.pipeline.transcribe(
             audio       = wav,
-            language    = language if language is not None else self.language,
+            language    = lang,
             task        = "transcribe",
             beam_size   = self.beam_size,
             temperature = self.temperature,

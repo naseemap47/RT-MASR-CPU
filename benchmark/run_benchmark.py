@@ -17,9 +17,9 @@ project root (the script changes into it), so it can be launched from anywhere.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
-import traceback
 from pathlib import Path
 
 # ── Ensure project root + src/ are importable ─────────────────────────────────
@@ -38,6 +38,13 @@ from benchmark.runners.concurrency_runner import ConcurrencyRunner
 from benchmark.runners.latency_runner import LatencyRunner
 from benchmark.runners.load_timer import measure_load_with_engine, release_memory
 from benchmark.runners.streaming_concurrency_runner import StreamingConcurrencyRunner
+from src.core.model_check import (
+    audio_missing_panel, bench_entries_not_downloaded, bench_id_hints, bench_table, report,
+    unknown_name_panel,
+)
+from src.core.runlog import start_run
+
+logger = logging.getLogger("rtmasr.benchmark")
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -130,24 +137,22 @@ def _benchmark_one_config(
     """
     config_id    = config_entry["id"]
     display_name = config_entry.get("display_name", config_id)
-    print(f"\n{'='*70}")
-    print(f"  Config: {display_name}")
-    print(f"{'='*70}")
+    logger.info("\n%s\n  Config: %s\n%s", "=" * 70, display_name, "=" * 70)
 
     stage = "load"
     try:
         # ── 1. Load (cold start) — the loaded engine is reused below ──────
-        print("\n[1/4] Loading engine (cold-start timing)...")
+        logger.info("[1/4] Loading engine (cold-start timing)...")
         load_result, engine = measure_load_with_engine(
             config_id, engine_factory(config_entry)
         )
         load_out.append(load_result)
-        print(f"  Load time : {load_result.load_time_s:.2f}s")
-        print(f"  RSS delta : {load_result.rss_delta_mb:.0f} MB")
+        logger.info("  Load time : %.2fs", load_result.load_time_s)
+        logger.info("  RSS delta : %.0f MB", load_result.rss_delta_mb)
 
         # ── 2. Latency & RTF ──────────────────────────────────────────────
         stage = "latency"
-        print("\n[2/4] Latency & RTF benchmark...")
+        logger.info("[2/4] Latency & RTF benchmark...")
         latency_out.extend(LatencyRunner(
             config_id=config_id, engine=engine, audio_files=all_audio,
             n_runs=n_runs, warmup_runs=warmup_runs,
@@ -156,17 +161,17 @@ def _benchmark_one_config(
         # ── 3. Accuracy ───────────────────────────────────────────────────
         if not args.skip_accuracy:
             stage = "accuracy"
-            print("\n[3/4] Accuracy benchmark (WER/CER)...")
+            logger.info("[3/4] Accuracy benchmark (WER/CER)...")
             accuracy_out.extend(AccuracyRunner(
                 config_id=config_id, engine=engine, references=references,
             ).run())
         else:
-            print("\n[3/4] Accuracy benchmark SKIPPED (--skip-accuracy).")
+            logger.info("[3/4] Accuracy benchmark SKIPPED (--skip-accuracy).")
 
         # ── 4. Concurrency ────────────────────────────────────────────────
         if not args.skip_concurrency:
             stage = "concurrency"
-            print("\n[4/4] Concurrency benchmark...")
+            logger.info("[4/4] Concurrency benchmark...")
             if conc_opts["mode"] == "stream":
                 concurrency_out.extend(StreamingConcurrencyRunner(
                     config_id=config_id,
@@ -188,7 +193,7 @@ def _benchmark_one_config(
                     n_rounds=n_rounds,
                 ).run())
         else:
-            print("\n[4/4] Concurrency benchmark SKIPPED (--skip-concurrency).")
+            logger.info("[4/4] Concurrency benchmark SKIPPED (--skip-concurrency).")
     except KeyboardInterrupt:
         raise
     except Exception as exc:
@@ -197,9 +202,7 @@ def _benchmark_one_config(
 
 # ── Main orchestration ────────────────────────────────────────────────────────
 
-def main() -> None:
-    args = parse_args()
-
+def _run(args: argparse.Namespace, run) -> None:
     # Resolve user-supplied paths against the launch directory, *then* switch to
     # the project root so every relative path inside the configs works.
     config_path = os.path.abspath(args.config)
@@ -233,28 +236,51 @@ def main() -> None:
         known = {c["id"] for c in all_configs}
         unknown = [m for m in wanted if m not in known]
         if unknown:
-            print(f"Unknown config id(s): {unknown}. Available: {sorted(known)}")
+            report(logger, unknown_name_panel(
+                "benchmark id", unknown, known, bench_table(all_configs), where="--models",
+                hints=[*bench_id_hints(unknown, all_configs), "",
+                       "Benchmark ids come from bench_config.yaml (not registry names):",
+                       "$ uv run python benchmark/run_benchmark.py --models <id>[,<id>...]"]))
             sys.exit(1)
         all_configs = [c for c in all_configs if c["id"] in set(wanted)]
     else:
         # Default run: skip configs marked `enabled: false` (default is enabled).
         disabled = [c["id"] for c in all_configs if not c.get("enabled", True)]
         if disabled:
-            print(f"Skipping disabled config(s): {', '.join(disabled)} "
-                  f"(run explicitly with --models <id> or set enabled: true)")
+            logger.info("Skipping disabled config(s): %s "
+                        "(run explicitly with --models <id> or set enabled: true)",
+                        ", ".join(disabled))
         all_configs = [c for c in all_configs if c.get("enabled", True)]
     if not all_configs:
-        print("No configs selected. Check --models or bench_config.yaml.")
+        logger.error("No configs selected. Check --models or bench_config.yaml.")
         sys.exit(1)
+
+    not_downloaded = bench_entries_not_downloaded(all_configs)
+    for _, panel in not_downloaded:
+        if not args.models:
+            panel.level = "warning"
+            panel.blank().note("Skipped in this run; the other configs continue.")
+        report(logger, panel)
+    if not_downloaded:
+        if args.models:
+            sys.exit(1)
+        skip = {e["id"] for e, _ in not_downloaded}
+        all_configs = [c for c in all_configs if c["id"] not in skip]
+        if not all_configs:
+            logger.error("No downloaded configs left to benchmark.")
+            sys.exit(1)
 
     # Audio files (latency) — warn about, and drop, missing files up front
     all_audio = collect_audio_files(cfg.get("audio", {}))
     missing = [a for a in all_audio if not os.path.exists(a)]
-    for a in missing:
-        print(f"WARNING: audio file missing, skipped: {a}")
     all_audio = [a for a in all_audio if os.path.exists(a)]
+    if missing:
+        panel = audio_missing_panel(missing, where=f"'audio' in {os.path.relpath(config_path)}")
+        if all_audio:
+            panel.level = "warning"
+            panel.blank().note("Missing clips are skipped in this run; the others are used.")
+        report(logger, panel)
     if not all_audio:
-        print("No audio files found. Check 'audio' in bench_config.yaml.")
         sys.exit(1)
 
     # Concurrency workload: identical for every config and every legs level
@@ -287,12 +313,12 @@ def main() -> None:
                 all_accuracy_results, all_concurrency_results,
             )
         except KeyboardInterrupt:
-            print("\nInterrupted — writing partial results.")
+            logger.warning("Interrupted — writing partial results.")
             failures.append({"config_id": config_id, "stage": "interrupted", "error": "KeyboardInterrupt"})
             interrupted = True
         except _StageError as exc:
             # One broken config must not throw away the results of the others.
-            traceback.print_exception(exc.__cause__)
+            logger.exception("Config %s failed at stage %s", config_id, exc.stage)
             failures.append({"config_id": config_id, "stage": exc.stage,
                              "error": f"{type(exc.__cause__).__name__}: {exc.__cause__}"})
         finally:
@@ -304,9 +330,8 @@ def main() -> None:
             break
 
     # ── Reporting ─────────────────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print("  Generating Reports")
-    print(f"{'='*70}")
+    logger.info("\n%s\n  Generating Reports\n%s", "=" * 70, "=" * 70)
+    stamp = run.stamp if run is not None else None
 
     all_results = {
         "hardware":    collect_hardware_info(),
@@ -330,16 +355,26 @@ def main() -> None:
         "failures":    failures,
     }
 
-    json_path    = JsonReporter(output_dir=output_dir).save(all_results)
-    summary_path = SummaryReporter(output_dir=output_dir).render(all_results)
+    json_path    = JsonReporter(output_dir=output_dir, stamp=stamp).save(all_results)
+    summary_path = SummaryReporter(output_dir=output_dir, stamp=stamp).render(all_results)
+    if run is not None:
+        run.note_artifact("raw_json", json_path)
+        run.note_artifact("summary_md", summary_path)
 
-    print(f"\n✓ Raw JSON   : {json_path}")
-    print(f"✓ Summary MD : {summary_path}")
+    logger.info("Raw JSON   : %s", json_path)
+    logger.info("Summary MD : %s", summary_path)
     if failures:
-        print(f"\n⚠ {len(failures)} config(s) failed: "
-              + ", ".join(f"{f['config_id']} ({f['stage']})" for f in failures))
+        logger.warning("%d config(s) failed: %s",
+                       len(failures),
+                       ", ".join(f"{f['config_id']} ({f['stage']})" for f in failures))
         sys.exit(2)
-    print("\nBenchmark complete.")
+    logger.info("Benchmark complete.")
+
+
+def main() -> None:
+    args = parse_args()
+    with start_run("benchmark") as run:
+        _run(args, run)
 
 
 if __name__ == "__main__":

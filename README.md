@@ -114,6 +114,9 @@ main.py                     FastAPI app: UI, /api/*, /ws/call-stream
 static/                     Web UI (index.html, app.js, style.css)
 src/
   core/config.py            Config + model-registry resolution
+  core/model_check.py       Model preflight: unknown name -> available list, missing files -> download command
+  core/runlog.py            Per-run log session (`run.log`, `run.meta.json`)
+  core/observe.py           AI inference traces (`traces.jsonl`, no UI)
   engines/
     live_call_session.py    Per-call buffer, energy gate, VAD, telemetry
     qwen3_onnx_engine.py    Qwen3-ASR ONNX Runtime engine
@@ -133,8 +136,9 @@ benchmark/                  Offline benchmark pipeline (runners, metrics, report
 loadtest/                   Load test (call-leg simulator, saturation search) + sizing model
 tests/                      Server / session / streaming tests
 models/                     Downloaded weights (git-ignored)
-test_audio/{en,cn,id}/      Test WAV files (git-ignored)
+test_audio/{en,cn,id}/      Test WAV files (git-ignored; download with --test-audio)
 docs/                       Architecture, changelog, benchmark and load-test docs
+logs/                       Per-run capture (git-ignored): logs/<pipeline>/<UTC>/
 ```
 
 ---
@@ -236,6 +240,30 @@ models/qwen3-asr-onnx-<size>-<prec>/   encoder[.int4].onnx  decoder_init[.int4].
 models/whisper_int8/               {tiny,base,small,medium}_{encoder,decoder}_11_int8.onnx  ...
 ```
 
+### Missing or mistyped models
+
+The server, benchmark, load test, `check_models.py` and the downloader check the model before loading it:
+
+- **Not downloaded:** the terminal shows which files are missing and the exact command to fetch them.
+- **Wrong name / id:** the terminal shows "did you mean …" and a table of valid names with a `DOWNLOADED` yes/NO column.
+
+```text
+╭─ ✖ Model not downloaded ─────────────────────────────────────────────╮
+│                                                                      │
+│ Model         whisper_fp16                                           │
+│ Location      models/whisper_fp16                                    │
+│ Missing       medium_encoder*.onnx, medium_decoder*.onnx             │
+│                                                                      │
+│ Download it with                                                     │
+│   $ uv run python src/utils/download_utils.py --model whisper_fp16   │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯
+```
+
+The panel is boxed so it stands out from normal log lines: red for errors, yellow for skipped models, the command in cyan and the `DOWNLOADED` column in green / red. Color is used only on a terminal; `NO_COLOR=1` turns it off, `FORCE_COLOR=1` forces it, and `run.log` always gets plain text. The server stops after the panel without a traceback.
+
+Benchmark and load-test ids (`qwen3_onnx_int8_0.6b`) differ from registry names (`qwen3_onnx_0.6b_int8`). Their table shows both, and typing a registry name where an id is expected tells you which id to use. In a default run (no `--models`), models that are not downloaded are skipped with that message; when you name one explicitly with `--models`, the run stops instead.
+
 ---
 
 ## Which model can my PC run?
@@ -275,14 +303,28 @@ that is free at that moment.
 
 ## Test audio
 
-WAV files are git-ignored, so add your own under `test_audio/`. The folder name
-sets the language the UI shows for a sample: `en`, `cn` (or `zh`), `id`.
+WAV files are git-ignored. The project's test clips are on the Hugging Face dataset
+[`naseemap47/RT-MASR-CPU`](https://huggingface.co/datasets/naseemap47/RT-MASR-CPU);
+download them into `test_audio/` with the same folder layout (no token needed):
+
+```bash
+uv run python src/utils/download_utils.py --test-audio           # audio only
+uv run python src/utils/download_utils.py --test-audio --force   # re-download every clip
+uv run python src/utils/download_utils.py --test-audio --model qwen3_onnx_0.6b_int8   # audio + one model
+```
+
+Files already present with the right size are skipped. If the clips are missing,
+the server, `check_models.py`, the benchmark and the load test print a
+"Test audio not downloaded" panel with this command, like they do for models.
+You can also add your own
+WAVs under `test_audio/`. The folder name sets the language the UI shows for a
+sample: `en`, `cn` (or `zh`), `id`.
 
 ```
 test_audio/
-  en/  librispeech_0_1089_0.wav  librispeech_1_1089_1.wav  librispeech_2_1089_2.wav
-  cn/  OSR_cn_000_0072_8k.wav  OSR_cn_000_0073_8k.wav
-  id/  ind_001.wav  ind_002.wav
+  en/  librispeech_0_1089_0.wav  librispeech_1_1089_1.wav  librispeech_2_1089_2.wav  harvard.wav  jackhammer.wav
+  cn/  OSR_cn_000_0072_8k.wav  OSR_cn_000_0073_8k.wav  OSR_cn_000_0074_8k.wav  OSR_cn_000_0075_8k.wav
+  id/  ind_001.wav  ind_002.wav  ind_003.wav
 ```
 
 These are the files `benchmark/configs/bench_config.yaml` and
@@ -317,7 +359,7 @@ The name is resolved through `config/models/models.yaml` to a per-model YAML
 (`config/models/<name>.yaml`) that holds engine settings such as `num_threads`
 (0 = all cores), `quantize`, `dtype`, default `language` and ORT session options.
 
-- The repo currently ships with `default_model: "whisper_int8_tiny"`. Qwen3-1.7B
+- The repo currently ships with `default_model: "qwen3_onnx_0.6b_int4"`. Qwen3-1.7B
   ran slower than real time on an 8-core CPU in our benchmark (RTF ≈ 1.0–1.5); use
   `qwen3_onnx_0.6b_int8` or `whisper_int8_tiny` for a smooth live demo.
 - `whisper_*` entries are served with **sliding-window streaming**: the window
@@ -349,7 +391,10 @@ Open <http://localhost:8000>, then:
 4. **Hang Up** ends the call early; **Reset** clears the UI.
 
 The model loads at startup (a few seconds for ONNX). `GET /api/health` reports
-`model_ready`, the active model and process CPU/RSS.
+`model_ready`, the active model and process CPU/RSS. If `default_model` /
+`RT_MASR_MODEL` is misspelled or its weights are not downloaded, startup stops
+with the list of available models or the download command (see
+[Missing or mistyped models](#missing-or-mistyped-models)).
 
 ---
 
@@ -476,6 +521,42 @@ uv run pytest                                   # all of tests/ (needs models + 
 
 ---
 
+## Logs and AI traces
+
+Every pipeline run writes a directory under `logs/<pipeline>/<UTC stamp>/`:
+
+| Pipeline | Command |
+|---|---|
+| `server` | `uvicorn main:app` / `python main.py` |
+| `benchmark` | `benchmark/run_benchmark.py` |
+| `loadtest` | `loadtest/run_loadtest.py` |
+| `sizing` | `loadtest/run_sizing.py` |
+| `download` | `src/utils/download_utils.py` |
+| `check_models` | `src/utils/check_models.py` |
+
+| File | What it is |
+|---|---|
+| `run.log` | Console + Python logging (`rtmasr.*`) |
+| `run.meta.json` | argv, pid, duration, exit code, paths of result files |
+| `traces.jsonl` | One JSON object per model inference (LangSmith-style run; no UI) |
+
+The UTC stamp is the same one on `benchmark/results/` and `loadtest/results/` filenames. `logs/<pipeline>/latest` is a symlink to the newest run. Load-test workers and `check_models` child processes add `workers/<name>.log` and `workers/<name>.traces.jsonl`.
+
+`run.log` is the process transcript. `traces.jsonl` is AI observability only: a live call or load-test leg is a parent `chain` run; each `transcribe` / `transcribe_stream` pass is a child `llm` run. Join a call's inferences by `trace_id`. Inputs store audio length and sample count (never the waveform). Outputs store transcript text (clipped at 4,000 characters), tokens, RTF and stage timings (`encoder_s`, `prefill_s`, `decode_s`).
+
+```bash
+ls logs/loadtest/latest/
+# run.log  run.meta.json  traces.jsonl
+
+# group one live call's inferences
+jq -s 'group_by(.trace_id)[] | {trace_id: .[0].trace_id, runs: [.[] | {name, latency_ms, status}]}' \
+  logs/server/latest/traces.jsonl
+```
+
+`RT_MASR_LOG_DIR` overrides the logs root, `RT_MASR_LOG_LEVEL=DEBUG` raises verbosity, `RT_MASR_NO_LOG=1` disables file capture, `RT_MASR_OBSERVE=0` turns traces off. The live server also reads `server.log_level` from `config/config.yaml`. Pytest does not create log dirs.
+
+---
+
 ## Known limitations
 
 - Whisper live streaming re-encodes a 30 s-padded window every hop, so only tiny (and
@@ -498,7 +579,7 @@ uv run pytest                                   # all of tests/ (needs models + 
 
 | Document | Contents |
 |---|---|
-| [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract |
+| [`docs/arch/architecture.md`](docs/arch/architecture.md) | Current POC architecture, streaming design, protocol, metrics, engine contract, AI traces |
 | [`docs/arch/changes.md`](docs/arch/changes.md) | Chronological changelog of architectural decisions and fixes |
 | [`docs/benchmark/benchmarking.md`](docs/benchmark/benchmarking.md) | Benchmark pipeline design, CLI, metrics and outputs |
 | [`docs/loadtest/loadtest.md`](docs/loadtest/loadtest.md) | Load-test pipeline: leg simulation, saturation search, sizing model |

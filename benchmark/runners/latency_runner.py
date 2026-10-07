@@ -9,9 +9,12 @@ Reports P50/P95/P99 across the measured runs. Captures system metrics
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("rtmasr.benchmark.latency")
 
 from benchmark.metrics.audio_info import audio_duration_s
 from benchmark.metrics.statistics import summarise
@@ -108,7 +111,7 @@ class LatencyRunner:
         summaries: list[LatencyRunSummary] = []
 
         for audio_file in self.audio_files:
-            print(f"  [latency] {audio_file}")
+            logger.info("[latency] %s", audio_file)
 
             # Warmup
             for _ in range(self.warmup_runs):

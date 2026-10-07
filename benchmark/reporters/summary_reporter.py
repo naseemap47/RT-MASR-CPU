@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.runlog import get_logger
+
+logger = get_logger("benchmark.reporter")
+
 
 def _fmt(v: Any, decimals: int = 3) -> str:
     """Format a numeric value for table display."""
@@ -38,11 +42,13 @@ class SummaryReporter:
 
     Args:
         output_dir: Directory where the Markdown file is written.
+        stamp: UTC stamp shared with the raw JSON (and the run log). Default: now.
     """
 
-    def __init__(self, output_dir: str) -> None:
+    def __init__(self, output_dir: str, stamp: str | None = None) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.stamp = stamp or datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     # ── Concurrency sections ─────────────────────────────────────────────
 
@@ -380,14 +386,13 @@ class SummaryReporter:
                                   str(f.get("error", "")).replace("|", "/")[:200]] for f in failures]) + "\n")
 
         # ── Write file ────────────────────────────────────────────────────
-        ts_file = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"{ts_file}_summary.md"
+        filename = f"{self.stamp}_summary.md"
         path = self.output_dir / filename
         content = "\n".join(lines)
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        print(content)
-        print(f"\n[reporter] Summary saved: {path}")
+        logger.info("\n%s", content)
+        logger.info("Summary saved: %s", path)
         return str(path)

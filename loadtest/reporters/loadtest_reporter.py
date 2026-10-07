@@ -26,10 +26,10 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 class LoadtestReporter:
     """Writes ``<UTC>_loadtest_raw.json`` and ``<UTC>_loadtest_summary.md`` (re-writable as a run progresses)."""
 
-    def __init__(self, output_dir: str) -> None:
+    def __init__(self, output_dir: str, stamp: str | None = None) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.stamp = stamp or datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     @property
     def json_path(self) -> Path:

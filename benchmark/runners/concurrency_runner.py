@@ -15,10 +15,13 @@ Every concurrency level processes the *same* audio workload (calls cycle through
 from __future__ import annotations
 
 import gc
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+logger = logging.getLogger("rtmasr.benchmark.concurrency")
 
 from benchmark.metrics.audio_info import audio_duration_s
 from benchmark.metrics.statistics import summarise
@@ -84,7 +87,7 @@ class ConcurrencyRunner:
     def _run_one_legs(self, engine: Any, n_legs: int) -> ConcurrencyResult:
         """Benchmark one concurrency level."""
         n_calls = n_legs * self.n_rounds
-        print(f"  [concurrency] n_legs={n_legs}, n_rounds={self.n_rounds} ({n_calls} calls)")
+        logger.info("[concurrency] n_legs=%s, n_rounds=%s (%s calls)", n_legs, self.n_rounds, n_calls)
 
         # Identical workload prefix at every level -> comparable results.
         call_args = [self.audio_files[i % len(self.audio_files)] for i in range(n_calls)]
@@ -111,7 +114,7 @@ class ConcurrencyRunner:
                     try:
                         res = future.result()
                     except Exception as exc:
-                        print(f"    [concurrency] call error: {exc}")
+                        logger.error("[concurrency] call error: %s", exc)
                         errors += 1
                         continue
                     latencies.append(res["latency_s"])
@@ -149,11 +152,11 @@ class ConcurrencyRunner:
         engine = self.engine_factory()
         try:
             if self.warmup and self.audio_files:
-                print("  [concurrency] warm-up call (not timed)")
+                logger.info("[concurrency] warm-up call (not timed)")
                 try:
                     engine.transcribe(self.audio_files[0])
                 except Exception as exc:
-                    print(f"    [concurrency] warm-up error: {exc}")
+                    logger.error("[concurrency] warm-up error: %s", exc)
 
             return [self._run_one_legs(engine, n_legs) for n_legs in self.legs_list]
         finally:

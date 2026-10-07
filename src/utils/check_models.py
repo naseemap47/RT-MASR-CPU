@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import os
 import platform
 import statistics
@@ -52,7 +53,16 @@ import psutil
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+from core.model_check import (  # noqa: E402
+    Panel, audio_missing_panel, download_command, is_test_audio, missing_files, registry_table,
+    report, unknown_name_panel,
+)
+
 RESULT_TAG = "@@RESULT@@ "
+logger = logging.getLogger("rtmasr.check_models")
 
 # ── Tunables ──────────────────────────────────────────────────────────────────
 REALTIME_RTF   = 0.5      # <= this: REAL-TIME
@@ -66,13 +76,6 @@ DEFAULT_AUDIO  = "test_audio/en/librispeech_0_1089_0.wav"
 # Approximate accuracy ranking, only used to pick "best model that still keeps up".
 _SIZE_RANK = {"tiny": 1.0, "base": 2.0, "small": 3.0, "medium": 4.0, "0.6b": 4.5, "1.7b": 6.0}
 _PRECISION_PENALTY = {"int4": 0.3, "int8": 0.1}
-
-_DEFAULT_ONNX_FILES = [
-    "decoder_init.int8.onnx", "decoder_step.int8.onnx", "embed_tokens.bin",
-    "encoder_conv.onnx", "encoder_conv.onnx.data",
-    "encoder_transformer.onnx", "encoder_transformer.onnx.data", "tokenizer.json",
-]
-
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -115,55 +118,6 @@ def load_registry() -> list[dict]:
     return reg["models"]
 
 
-def _size(paths) -> int:
-    return sum(p.stat().st_size for p in paths if p.is_file())
-
-
-def inspect_files(cfg: dict) -> tuple[list[str], int]:
-    """Return (missing file descriptions, bytes on disk) for one model config."""
-    dl = cfg.get("download", {})
-    eng = cfg.get("engine", {})
-    method = dl.get("method", "snapshot")
-    backend = cfg.get("backend")
-
-    if method == "hf_files":
-        d = ROOT / dl["target_dir"]
-        files = dl["files"]
-        missing = [f for f in files if not (d / f).is_file() or (d / f).stat().st_size == 0]
-        return missing, _size(d / f for f in files)
-
-    if method == "onnx":
-        d = ROOT / dl["target_dir"]
-        files = dl.get("required_files") or _DEFAULT_ONNX_FILES
-        missing = [f for f in files if not (d / f).is_file()]
-        return missing, _size(d / f for f in files)
-
-    if method == "whisper" or backend == "whisper":
-        d = ROOT / eng.get("model_dir", dl.get("target_dir", ""))
-        size = eng.get("model_name", "")
-        enc = sorted(d.glob(f"{size}_encoder*.onnx")) if d.is_dir() else []
-        dec = sorted(d.glob(f"{size}_decoder*.onnx")) if d.is_dir() else []
-        missing = []
-        if not enc:
-            missing.append(f"{size}_encoder*.onnx")
-        if not dec:
-            missing.append(f"{size}_decoder*.onnx")
-        # Prefer files of the configured precision when several exist.
-        prec = eng.get("precision", "")
-        pick = lambda fs: [f for f in fs if prec and prec in f.name] or fs[:1]
-        return missing, _size(pick(enc) + pick(dec))
-
-    # snapshot (Transformers): a directory with config.json + safetensors weights
-    d = ROOT / dl.get("local_dir", eng.get("model_path", ""))
-    weights = sorted(d.glob("*.safetensors")) if d.is_dir() else []
-    missing = []
-    if not (d / "config.json").is_file():
-        missing.append("config.json")
-    if not weights:
-        missing.append("*.safetensors")
-    return missing, _size(weights)
-
-
 def missing_dependencies(backend: str) -> list[str]:
     need = {
         "onnx": ["onnxruntime", "soundfile", "tokenizers"],
@@ -197,7 +151,7 @@ def inspect_model(entry: dict) -> ModelReport:
         config=entry["config"],
         quality=quality_score(entry["name"], cfg),
     )
-    missing, disk = inspect_files(cfg)
+    missing, disk = missing_files(cfg)
     rep.missing, rep.disk_gb = missing, disk / 1024 ** 3
     rep.downloaded = not missing
     rep.missing_deps = missing_dependencies(backend)
@@ -292,6 +246,17 @@ def run_model(rep: ModelReport, audio: str, runs: int, timeout: float) -> None:
         fout.seek(0); ferr.seek(0)
         stdout, stderr = fout.read(), ferr.read()
 
+    try:
+        from core.runlog import current_run
+        session = current_run()
+        if session is not None:
+            session.workers_dir.mkdir(parents=True, exist_ok=True)
+            (session.workers_dir / f"{rep.name}.stdout.log").write_text(stdout, encoding="utf-8")
+            if stderr.strip():
+                (session.workers_dir / f"{rep.name}.stderr.log").write_text(stderr, encoding="utf-8")
+    except Exception:
+        pass
+
     rep.ran = True
     rep.peak_ram_gb = peak / 1024 ** 3
     if reason == "oom":
@@ -363,13 +328,16 @@ def system_summary() -> dict:
 
 
 def print_system(info: dict) -> None:
-    print("=" * 78)
-    print(" RT-MASR model compatibility check")
-    print("=" * 78)
-    print(f" CPU    : {info['cpu']}  ({info['physical_cores']} cores / {info['logical_cores']} threads)")
-    print(f" RAM    : {info['ram_total_gb']} GB total, {info['ram_available_gb']} GB available now")
-    print(f" Python : {info['python']}   onnxruntime: {info['onnxruntime']}   PyTorch: {info['torch']}")
-    print("-" * 78)
+    logger.info("=" * 78)
+    logger.info(" RT-MASR model compatibility check")
+    logger.info("=" * 78)
+    logger.info(" CPU    : %s  (%s cores / %s threads)",
+                info["cpu"], info["physical_cores"], info["logical_cores"])
+    logger.info(" RAM    : %s GB total, %s GB available now",
+                info["ram_total_gb"], info["ram_available_gb"])
+    logger.info(" Python : %s   onnxruntime: %s   PyTorch: %s",
+                info["python"], info["onnxruntime"], info["torch"])
+    logger.info("-" * 78)
 
 
 def _fmt(v: Optional[float], spec: str, unit: str = "") -> str:
@@ -378,51 +346,63 @@ def _fmt(v: Optional[float], spec: str, unit: str = "") -> str:
 
 def print_table(reports: list[ModelReport]) -> None:
     head = f"{'Model':<24}{'Verdict':<16}{'Load':>7}{'Latency':>9}{'RTF':>6}{'Peak RAM':>10}{'Est. RAM':>10}"
-    print("\n" + head)
-    print("-" * len(head))
+    logger.info("\n%s", head)
+    logger.info("-" * len(head))
     for r in reports:
-        print(f"{r.name:<24}{r.status:<16}"
-              f"{_fmt(r.load_s, '.1f', 's'):>7}{_fmt(r.latency_s, '.2f', 's'):>9}"
-              f"{_fmt(r.rtf, '.2f'):>6}{_fmt(r.peak_ram_gb, '.1f', ' GB'):>10}"
-              f"{_fmt(r.est_ram_gb if r.downloaded else None, '.1f', ' GB'):>10}")
+        logger.info("%-24s%-16s%7s%9s%6s%10s%10s",
+                    r.name, r.status,
+                    _fmt(r.load_s, ".1f", "s"), _fmt(r.latency_s, ".2f", "s"),
+                    _fmt(r.rtf, ".2f"), _fmt(r.peak_ram_gb, ".1f", " GB"),
+                    _fmt(r.est_ram_gb if r.downloaded else None, ".1f", " GB"))
         if r.note:
-            print(f"    ↳ {r.note}")
+            logger.info("    ↳ %s", r.note)
 
 
 def recommend(reports: list[ModelReport]) -> None:
     ok = [r for r in reports if r.usable]
     rt = [r for r in ok if r.status == "REAL-TIME"]
-    print("\n" + "=" * 78)
-    print(" Recommendation")
-    print("=" * 78)
+    logger.info("\n%s", "=" * 78)
+    logger.info(" Recommendation")
+    logger.info("=" * 78)
     if not ok:
-        print(" No model could run on this machine. Check the notes above (download the")
-        print(" models, free up RAM, or try a smaller model such as whisper_int8_tiny).")
+        logger.info(" No model could run on this machine. Check the notes above (download the")
+        logger.info(" models, free up RAM, or try a smaller model such as whisper_int8_tiny).")
         return
     if rt:
         best = max(rt, key=lambda r: (r.quality, -(r.rtf or 9)))
         fast = min(rt, key=lambda r: r.rtf or 9)
         light = min(rt, key=lambda r: r.peak_ram_gb or 99)
-        print(f" Best accuracy that still keeps up live : {best.name}  (RTF {best.rtf:.2f})")
-        print(f" Fastest                                : {fast.name}  (RTF {fast.rtf:.2f})")
-        print(f" Lightest on RAM                        : {light.name}  ({light.peak_ram_gb:.1f} GB)")
-        print(f"\n Set it in config/config.yaml:  default_model: \"{best.name}\"")
-        print(f" or for one run:                RT_MASR_MODEL={best.name} uv run python main.py")
+        logger.info(" Best accuracy that still keeps up live : %s  (RTF %.2f)", best.name, best.rtf)
+        logger.info(" Fastest                                : %s  (RTF %.2f)", fast.name, fast.rtf)
+        logger.info(" Lightest on RAM                        : %s  (%.1f GB)", light.name, light.peak_ram_gb)
+        logger.info(" Set it in config/config.yaml:  default_model: \"%s\"", best.name)
+        logger.info(" or for one run:                RT_MASR_MODEL=%s uv run python main.py", best.name)
     else:
         slow = min(ok, key=lambda r: r.rtf or 99)
-        print(f" No model is comfortably real-time here. Closest: {slow.name} (RTF {slow.rtf:.2f}).")
-        print(" It is fine for transcribing files, but live calls will lag.")
+        logger.info(" No model is comfortably real-time here. Closest: %s (RTF %.2f).", slow.name, slow.rtf)
+        logger.info(" It is fine for transcribing files, but live calls will lag.")
     off = [r for r in ok if r.status in ("BORDERLINE", "OFFLINE ONLY")]
     if off and rt:
-        print("\n Usable for files only (too slow for live): " + ", ".join(r.name for r in off))
-    print("\n Note: RTF is for ONE stream on a ~10 s clip. Whisper live streaming re-decodes a")
-    print(" sliding window and concurrent calls share the CPU, so keep headroom (RTF <~ 0.3).")
+        logger.info(" Usable for files only (too slow for live): %s", ", ".join(r.name for r in off))
+    logger.info(" Note: RTF is for ONE stream on a ~10 s clip. Whisper live streaming re-decodes a")
+    logger.info(" sliding window and concurrent calls share the CPU, so keep headroom (RTF <~ 0.3).")
+
+
+def report_not_downloaded(reports: list[ModelReport]) -> None:
+    missing = [r for r in reports if r.status == "NOT DOWNLOADED"]
+    if not missing:
+        return
+    p = Panel(f"{len(missing)} model(s) not downloaded", "warning")
+    p.note("Download only the ones you need:").blank()
+    for r in missing:
+        p.heading(r.name).command(download_command(r.name))
+    report(logger, p)
 
 
 def explain_skips(reports: list[ModelReport]) -> None:
     for r in reports:
         if r.status == "NOT DOWNLOADED":
-            r.note = f"missing {', '.join(r.missing[:3])}. Download: uv run python src/utils/download_utils.py --model {r.name}"
+            r.note = f"missing {', '.join(r.missing[:3])} (download command below)"
         elif r.status == "MISSING DEPS":
             r.note = f"python package(s) not installed: {', '.join(r.missing_deps)}"
 
@@ -452,19 +432,34 @@ def main() -> int:
     if args._worker:
         return worker_main(args)
 
+    from core.runlog import start_run
+    with start_run("check_models"):
+        code = _main(args)
+        if code:
+            sys.exit(code)
+        return 0
+
+
+def _main(args: argparse.Namespace) -> int:
     os.chdir(ROOT)
     registry = load_registry()
     if args.models:
         wanted = [m.strip() for m in args.models.split(",") if m.strip()]
         unknown = [m for m in wanted if m not in {e["name"] for e in registry}]
         if unknown:
-            print(f"Unknown model(s): {unknown}. Available: {[e['name'] for e in registry]}")
+            report(logger, unknown_name_panel(
+                "model", unknown, [e["name"] for e in registry], registry_table(registry),
+                where="--models",
+                hints=["$ uv run python src/utils/check_models.py --models <name>[,<name>...]"]))
             return 1
         registry = [e for e in registry if e["name"] in wanted]
 
     audio = args.audio
     if not (ROOT / audio).is_file() and not Path(audio).is_file():
-        print(f"Test audio not found: {audio}")
+        if is_test_audio(audio):
+            report(logger, audio_missing_panel([audio], where="--audio"))
+        else:
+            logger.error("Test audio not found: %s", audio)
         return 1
     audio = str(Path(audio).resolve()) if Path(audio).is_file() else str(ROOT / audio)
 
@@ -490,23 +485,25 @@ def main() -> int:
             rep.status = "OK (not run)"
             rep.note = f"files present, ~{rep.est_ram_gb:.1f} GB RAM needed"
         else:
-            print(f"{tag}: loading + transcribing ...", flush=True)
+            logger.info("%s: loading + transcribing ...", tag)
             run_model(rep, audio, args.runs, args.timeout)
-            print(f"{tag}: {rep.status}" + (f"  (RTF {rep.rtf:.2f})" if rep.rtf else ""), flush=True)
+            extra = f"  (RTF {rep.rtf:.2f})" if rep.rtf else ""
+            logger.info("%s: %s%s", tag, rep.status, extra)
             continue
-        print(f"{tag}: {rep.status}", flush=True)
+        logger.info("%s: %s", tag, rep.status)
 
     explain_skips(reports)
     print_table(reports)
+    report_not_downloaded(reports)
     if not args.no_run:
         recommend(reports)
     else:
-        print("\n(--no-run: nothing was executed, so no speed verdicts. Re-run without it to measure.)")
+        logger.info("(--no-run: nothing was executed, so no speed verdicts. Re-run without it to measure.)")
 
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"system": info, "audio": audio, "models": [asdict(r) for r in reports]}, indent=2))
-        print(f"\nJSON report written to {args.json}")
+        logger.info("JSON report written to %s", args.json)
 
     return 0 if any(r.usable or r.status == "OK (not run)" for r in reports) else 1
 

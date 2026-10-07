@@ -55,8 +55,13 @@ threads of a physical core). `--cpus N` / `--processes P` can shrink a smoke run
 
 **Which models:** `loadtest/configs/loadtest_config.yaml` `models:` is the roster (ids only). Each `id` must already exist
 in `benchmark/configs/bench_config.yaml` — that file maps the id to `backend` and `model_config` YAML. `--models a,b`
-selects a subset of the roster; it does not add an id that is missing from `loadtest_config.yaml`. Download weights
-before running (`src/utils/download_utils.py`).
+selects a subset of the roster; it does not add an id that is missing from `loadtest_config.yaml`. An unknown id prints
+"did you mean", the roster with registry names and a `DOWNLOADED` column, and says when the id exists in
+`bench_config.yaml` but not in the roster.
+
+Weights are checked before any worker starts. A model that is not downloaded prints the missing files and
+`uv run python src/utils/download_utils.py --model <registry name>`. In a default run it is skipped; if it was named with
+`--models`, the run stops. `--list` marks such models `[NOT DOWNLOADED]`.
 
 ## Safety on a shared machine
 
@@ -70,12 +75,17 @@ python3 loadtest/run_loadtest.py --list                          # show runs
 python3 loadtest/run_loadtest.py                                  # every model x profile in loadtest_config.yaml
 python3 loadtest/run_loadtest.py --profiles conversational --models whisper_int8_tiny
 python3 loadtest/run_loadtest.py --levels 1,2 --duration 15      # smoke run
+# Console + logging for the run: logs/loadtest/<UTC>/run.log  (same UTC stamp as the result files)
+# AI traces (one JSON run per inference, nested per leg): logs/loadtest/<UTC>/traces.jsonl
+# Worker processes add workers/<name>.log and workers/<name>.traces.jsonl
 python3 loadtest/run_sizing.py --input <dense_raw.json> <conv_raw.json>
 python3 loadtest/run_sizing.py --headroom 0.6 --serving-overhead 1.25 --spare-fraction 0.2 --legs 50,100,1000
 ```
 
 On restricted sandboxes set `NUMBA_CACHE_DIR=/tmp/numba_cache` (the scripts do this themselves). Do not run other heavy work while testing;
-results are only as clean as the machine.
+results are only as clean as the machine. Each load-test run also writes AI traces (`traces.jsonl`, plus per-worker
+files under `workers/`); a leg is a parent `call` chain and each inference pass is a child. `RT_MASR_OBSERVE=0` turns
+that off.
 
 ## Sizing model
 

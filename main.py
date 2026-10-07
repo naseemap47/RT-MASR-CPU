@@ -36,10 +36,12 @@ Whisper                      Sliding-window mode (src/engines/whisper_streaming.
 
 import asyncio
 import json
+import logging
 import time
 import psutil
 import threading
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Union
@@ -47,9 +49,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from src.core.config import resolve_model_config, load_server_config
+from src.core.config import load_server_config
+from src.core.model_check import (
+    ModelSetupError, audio_missing_panel, check_registry_model, has_test_audio, report,
+)
+from src.core.runlog import begin_run, in_pytest
 from src.engines.live_call_session import LiveCallSession
 from src.engines.whisper_streaming import StreamingConfig, WhisperSlidingWindowStreamer
+
+logger = logging.getLogger("rtmasr.server")
+_run_session = None
 
 # ── Config paths ──────────────────────────────────────────────────────────────
 CONFIG_PATH = "config/config.yaml"
@@ -79,7 +88,7 @@ def _build_engine(model_cfg: dict) -> ASREngine:
     in the resolved per-model config dict.
 
     Args:
-        model_cfg: Per-model config dict (from resolve_model_config).
+        model_cfg: Per-model config dict (from check_registry_model).
 
     Returns:
         A fully constructed engine instance (ONNXQwen3ASR, Qwen3ASR or WhisperOnnxEngine).
@@ -112,24 +121,54 @@ def _load_active_model() -> ASREngine:
     """Resolve the active model config, record its metadata and build the engine."""
     global _engine, _active_model_name, _active_backend, _streaming_cfg
 
-    model_cfg = resolve_model_config(CONFIG_PATH, model_name=_model_name_override())
+    override = _model_name_override()
+    name = override or load_server_config(CONFIG_PATH).get("default_model")
+    where = "RT_MASR_MODEL" if override else f"default_model in {CONFIG_PATH}"
+    model_cfg = check_registry_model(name, config_path=CONFIG_PATH, where=where)
     _active_model_name = model_cfg.get("display_name", model_cfg.get("name", "?"))
     _active_backend    = model_cfg.get("backend", "?")
     _streaming_cfg     = StreamingConfig.from_dict(model_cfg.get("streaming"))
 
-    print(f"Loading ASR engine: {_active_model_name} (backend={_active_backend}) ...")
+    logger.info("Loading ASR engine: %s (backend=%s) ...", _active_model_name, _active_backend)
     _engine = _build_engine(model_cfg)
     return _engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model_ready
+    global _model_ready, _run_session
 
-    _load_active_model()
+    server_cfg = load_server_config(CONFIG_PATH)
+    level = os.environ.get("RT_MASR_LOG_LEVEL") or server_cfg.get("server", {}).get("log_level", "info")
+    _run_session = begin_run("server", level=level, skip_if_pytest=True)
+
+    try:
+        _load_active_model()
+    except ModelSetupError as exc:
+        report(logger, exc.panel)
+        logger.error("Server startup aborted: fix the model setup above and restart.")
+        if _run_session is not None:
+            _run_session.close(exit_code=1)
+            _run_session = None
+        if in_pytest():
+            raise RuntimeError("ASR model setup failed (see the message above)") from None
+        # Uvicorn would follow the panel with a lifespan traceback; nothing is serving yet.
+        logging.shutdown()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
     _model_ready = True
-    print(f"Engine ready: {_active_model_name} (stream mode: {_stream_mode()})")
-    yield
+    logger.info("Engine ready: %s (stream mode: %s)", _active_model_name, _stream_mode())
+    if not has_test_audio():
+        report(logger, audio_missing_panel(level="warning").blank().note(
+            "The server still runs: the UI sample list stays empty until you download "
+            "the clips, but you can load a local WAV."))
+    try:
+        yield
+    finally:
+        if _run_session is not None:
+            _run_session.close()
+            _run_session = None
 
 
 def get_engine() -> ASREngine:
@@ -266,8 +305,10 @@ async def _run_inference(
         stage_timing: timing dict from the final ("", timing) sentinel,
                       or None if the generator produced no output
     """
+    import contextvars
     import numpy as np  # local import — already loaded, no cost
     loop = asyncio.get_event_loop()
+    ctx = contextvars.copy_context()
 
     def _collect() -> tuple[list[str], dict | None]:
         deltas: list[str] = []
@@ -279,7 +320,7 @@ async def _run_inference(
                 stage_timing = timing
         return deltas, stage_timing
 
-    return await loop.run_in_executor(None, _collect)
+    return await loop.run_in_executor(None, lambda: ctx.run(_collect))
 
 
 class _CallState:
@@ -344,6 +385,14 @@ async def _handle_audio_vad(
 
     engine = get_engine()
     boundary = session.find_vad_boundary()
+    try:
+        from src.core.observe import bound as _obs_bound
+    except ImportError:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def _obs_bound(**_k):
+            yield
 
     if boundary is not None:
         # ── Commit path: utterance boundary detected ───────────────────────
@@ -353,7 +402,8 @@ async def _handle_audio_vad(
         first_token_noted = session.first_token_time is not None
         utterance_audio = session.pop_utterance(boundary)
 
-        deltas, stage_timing = await _run_inference(engine, utterance_audio, state.language)
+        with _obs_bound(pass_kind="commit"):
+            deltas, stage_timing = await _run_inference(engine, utterance_audio, state.language)
 
         if deltas and not first_token_noted:
             session.mark_first_token()  # T3
@@ -368,7 +418,8 @@ async def _handle_audio_vad(
         t_infer_start = session.mark_infer_start()
         first_token_noted = session.first_token_time is not None
 
-        deltas, stage_timing = await _run_inference(engine, session.audio_buffer, state.language)
+        with _obs_bound(pass_kind="interim"):
+            deltas, stage_timing = await _run_inference(engine, session.audio_buffer, state.language)
 
         if deltas and not first_token_noted:
             session.mark_first_token()  # T3
@@ -435,11 +486,13 @@ async def _handle_audio_sliding(
 
     t_infer_start = session.mark_infer_start()
     try:
-        update = await asyncio.get_running_loop().run_in_executor(None, streamer.step)
+        import contextvars
+        ctx = contextvars.copy_context()
+        update = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: ctx.run(streamer.step),
+        )
     except Exception as exc:                        # keep the call alive on a bad pass
-        import traceback
-        traceback.print_exc()
-        print(f"[sliding-window] pass failed: {exc}")
+        logger.exception("sliding-window pass failed: %s", exc)
         return carry
     infer_duration_s = time.time() - t_infer_start
 
@@ -463,6 +516,9 @@ async def _handle_audio_sliding(
 @app.websocket("/ws/call-stream")
 async def websocket_call_stream(websocket: WebSocket):
     await websocket.accept()
+    peer = getattr(websocket.client, "host", None)
+    logger.info("websocket connected  peer=%s  model=%s  mode=%s",
+                peer, _active_model_name, _stream_mode())
     await websocket.send_json({
         "type": "connected",
         "model_ready": _model_ready,
@@ -504,6 +560,7 @@ async def websocket_call_stream(websocket: WebSocket):
 
                 if msg_type == "start_call":
                     state.language = data.get("language")
+                    logger.info("call start  language=%s", state.language or "auto")
                     # ── T0: call-start ─────────────────────────────────
                     session.mark_call_start()
 
@@ -517,6 +574,7 @@ async def websocket_call_stream(websocket: WebSocket):
                             encoding=audio_fmt.get("encoding"),
                         )
                     except (ValueError, TypeError) as exc:
+                        logger.warning("unsupported audio format: %s", exc)
                         await websocket.send_json({
                             "type": "error",
                             "error": "unsupported_audio_format",
@@ -542,8 +600,10 @@ async def websocket_call_stream(websocket: WebSocket):
                     if streamer is not None:
                         # Finalise the window: transcribe what is left, commit everything.
                         t_infer_start = session.mark_infer_start()
+                        import contextvars
+                        ctx = contextvars.copy_context()
                         update = await asyncio.get_running_loop().run_in_executor(
-                            None, streamer.finish
+                            None, lambda: ctx.run(streamer.finish),
                         )
                         infer_duration_s = time.time() - t_infer_start
                         if update is not None and update.full_text and session.first_token_time is None:
@@ -583,6 +643,13 @@ async def websocket_call_stream(websocket: WebSocket):
                         metrics["stream_mode"] = "vad_utterance"
 
                     metrics["total_call_time_s"] = round(total_call_time, 2)
+                    logger.info("call ended  duration_s=%.2f  chars=%d",
+                                total_call_time, len(final_text or ""))
+                    session.mark_call_end(outputs={
+                        "text": final_text,
+                        "stream_mode": metrics.get("stream_mode"),
+                        "total_call_time_s": metrics.get("total_call_time_s"),
+                    })
 
                     await websocket.send_json({
                         "type": "call_ended",
@@ -592,8 +659,10 @@ async def websocket_call_stream(websocket: WebSocket):
                     break
 
     except WebSocketDisconnect:
-        pass
+        logger.info("websocket disconnected")
+        session.mark_call_end()
     finally:
+        session.mark_call_end()
         reader.cancel()
 
 if __name__ == "__main__":
